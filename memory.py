@@ -18,14 +18,14 @@ async def save_message(role: str, text):
     
     if  len(historial) >= 15:
         msg_antiguos = historial[:8]
-        res = await agent.summarize(msg_antiguos, resumen_previo)
-        del historial[:8]
-        resumen_previo = res #donde guardar el resumen previo?
-        prompt["role"] = "user"
-        prompt["fecha"] = datetime.now()
-        prompt["text"] = res
-        historial.append(prompt)
+        resumen_previo = await agent.summarize(msg_antiguos, resumen_previo)
+        del historial[:8] #historial se queda solamente con los ultimos 8
         
 def get_history():
     return historial
 
+def get_resumen():
+    if resumen_previo != "":
+        return resumen_previo
+    else:
+        return False

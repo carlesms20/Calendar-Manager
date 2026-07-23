@@ -137,9 +137,18 @@ async def process_message(history: list):
             "role": msg["role"],
             "parts": [{"text": texto}]
         })
+
+    system_prompt = get_system_prompt()
+    resumen = memory.get_resumen()
+    if resumen:
+        system_prompt += f"""
+        CONTEXTO CONVERSACIÓN PREVIA, 
+        Este es un resumen del sistema sobre partes anteriores de la conversación.
+        NO son mensajes del usuario, es contexto para que sepas qué se ha hablado antes::{resumen}
+        """
     
     config = types.GenerateContentConfig(
-        system_instruction=get_system_prompt(),
+        system_instruction=system_prompt,
         temperature=0.3,
         max_output_tokens=1024,
     )
@@ -148,26 +157,49 @@ async def process_message(history: list):
     await memory.save_message("model", res_agent)
     return res_agent
 
-async def summarize(history: list):
-    pre_prompt = """Eres un asistente de resumen. Tu tarea es condensar la siguiente conversación en un párrafo breve conservando:
-            - Datos personales mencionados (nombres, fechas, preferencias)
-            - Decisiones tomadas o confirmadas
-            - Contexto importante para continuar la conversación
-            - Fechas y horas relevantes
-            NO incluyas saludos, agradecimientos, ni relleno conversacional.
-            Responde SOLO con el resumen, sin introducciones tipo "Aquí tienes el resumen:"."""
-    contents = []
+async def summarize(history: list, resumen_previo: str = ""):
+    lineas = []
     for msg in history:
-        if msg["role"] == "user":
-            texto = f"[{msg['fecha'].strftime('%Y-%m-%d %H:%M:%S')}] {msg['text']}"
-        else:
-            texto = msg["text"]
-        content = {
-            "role": msg["role"],
-            "parts": [{"text": texto}] #parts es una lista de diccionarios, por que puede que un mensaje lleve texto, archivo, etc...
+        fecha_str = msg['fecha'].strftime('%Y-%m-%d %H:%M:%S')
+        linea = f"[{fecha_str}] {msg['role']}: {msg['text']}"
+        lineas.append(linea)
+
+    conversacion = "\n".join(lineas) #para que el modelo vea el historial como: [2026-07-23 11:48:12] user: hola *mas sencillo*
+    pre_prompt = f"""Eres un asistente de resumen acumulativo de una conversación en curso.
+
+        Recibes:
+        1. Un resumen previo (puede estar vacío si es la primera vez).
+        2. Nuevos mensajes a añadir al resumen.
+
+        Tu tarea: fusionar ambos en un resumen único, actualizado y coherente.
+
+        Conserva:
+        - Datos personales, nombres, fechas concretas.
+        - Decisiones tomadas y confirmadas.
+        - Preferencias del usuario detectadas.
+        - Tareas mencionadas y su estado.
+        - Contexto necesario para continuar la conversación.
+
+        Descarta: saludos, small talk, repeticiones, aclaraciones resueltas.
+
+        Máximo 300 palabras. NO uses markdown. Responde SOLO con el resumen actualizado.
+
+        ---
+
+        RESUMEN PREVIO:
+        {resumen_previo if resumen_previo else "(vacío, primera iteración)"}
+
+        ---
+
+        NUEVOS MENSAJES:
+        {conversacion}
+        """
+    contents =[]
+    content = {
+            "role": "user",
+            "parts": [{"text": pre_prompt}] #parts es una lista de diccionarios, por que puede que un mensaje lleve texto, archivo, etc...
         }
-        contents.append(content)
-    contents.append(pre_prompt)
+    contents.append(content)
     config = types.GenerateContentConfig(
         temperature=0.2,         
         max_output_tokens=512,
