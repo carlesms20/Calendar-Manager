@@ -1,4 +1,4 @@
-#Canal de entrada / salida de telegram.
+#Canal de entrada / salida de telegram. Orquestador del agente.
 
 import asyncio
 import sys
