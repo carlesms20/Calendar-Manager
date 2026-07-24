@@ -140,8 +140,7 @@ async def process_message(history: list):
 
     system_prompt = get_system_prompt()
     resumen = memory.get_resumen()
-    if resumen:
-        system_prompt += f"""
+    system_prompt += f"""
         CONTEXTO CONVERSACIÓN PREVIA, 
         Este es un resumen del sistema sobre partes anteriores de la conversación.
         NO son mensajes del usuario, es contexto para que sepas qué se ha hablado antes::{resumen}

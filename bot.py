@@ -19,6 +19,14 @@ dp = Dispatcher() #enruta los mensajes que llegan, según el tipo
 
 async def text_handler(message: Message):
     await memory.save_message("user",message.text) #guarda mensaje en el historial, para memoria de chat
+    if memory.check_history():
+        history = memory.get_history()
+        old_msg = history[:8]
+        resumen_previo = memory.get_resumen()
+        nuevo_resumen = await agent.summarize(old_msg, resumen_previo)  # primero esto
+        memory.set_resumen(nuevo_resumen)                                # persiste
+        memory.del_history() 
+
     prompt = memory.get_history()
     respuesta = await agent.process_message(prompt)
     await message.answer(respuesta)
