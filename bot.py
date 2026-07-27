@@ -28,7 +28,7 @@ async def text_handler(message: Message):
         memory.del_history() 
 
     prompt = memory.get_history()
-    resumen = memory.get_resumen
+    resumen = memory.get_resumen()
     respuesta = await agent.process_message(prompt, resumen)
     await memory.save_message("model", respuesta)
     await message.answer(respuesta)
