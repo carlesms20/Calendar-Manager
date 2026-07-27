@@ -1,7 +1,6 @@
 from google import genai
 from os import getenv
 from dotenv import load_dotenv
-import memory
 import asyncio
 from google.genai import types
 
@@ -126,7 +125,7 @@ Si falta algo, propónlo tú mismo o pregunta brevemente.
 - No inventes sistemas, contadores, protocolos o estados que no existen. Si el usuario menciona algo casual (como "los 10"), no lo conviertas en un mecanismo formal.
 """
 
-async def process_message(history: list):
+async def process_message(history: list, resumen):
     contents = []
     for msg in history:
         if msg["role"] == "user":
@@ -139,7 +138,6 @@ async def process_message(history: list):
         })
 
     system_prompt = get_system_prompt()
-    resumen = memory.get_resumen()
     system_prompt += f"""
         CONTEXTO CONVERSACIÓN PREVIA, 
         Este es un resumen del sistema sobre partes anteriores de la conversación.
@@ -153,7 +151,6 @@ async def process_message(history: list):
     )
     
     res_agent = (await client.aio.models.generate_content(model="gemini-3.1-flash-lite", contents=contents, config=config)).text
-    await memory.save_message("model", res_agent)
     return res_agent
 
 async def summarize(history: list, resumen_previo: str = ""):

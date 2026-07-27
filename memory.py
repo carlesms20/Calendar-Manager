@@ -18,6 +18,12 @@ async def save_message(role: str, text):
 def get_history():
     return historial
 
+def del_history():
+    del historial[:8]
+
+def check_history():
+    return len(historial) >= 15
+
 def get_resumen():
     if resumen_previo:
         return resumen_previo
@@ -27,9 +33,3 @@ def get_resumen():
 def set_resumen(new_resumen):
     global resumen_previo
     resumen_previo = new_resumen
-
-def check_history():
-    return len(historial) >= 15
-
-def del_history():
-    del historial[:8]

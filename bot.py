@@ -23,12 +23,14 @@ async def text_handler(message: Message):
         history = memory.get_history()
         old_msg = history[:8]
         resumen_previo = memory.get_resumen()
-        nuevo_resumen = await agent.summarize(old_msg, resumen_previo)  # primero esto
-        memory.set_resumen(nuevo_resumen)                                # persiste
+        nuevo_resumen = await agent.summarize(old_msg, resumen_previo)  
+        memory.set_resumen(nuevo_resumen)                               
         memory.del_history() 
 
     prompt = memory.get_history()
-    respuesta = await agent.process_message(prompt)
+    resumen = memory.get_resumen
+    respuesta = await agent.process_message(prompt, resumen)
+    await memory.save_message("model", respuesta)
     await message.answer(respuesta)
 
 async def audio_handler(message: Message):
