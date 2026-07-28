@@ -3,6 +3,7 @@ from os import getenv
 from dotenv import load_dotenv
 import asyncio
 from google.genai import types
+from tools import responder_texto, crear_evento
 
 load_dotenv()
 TOKEN = getenv("API_GEMINI")
@@ -24,6 +25,12 @@ Eres el asistente operativo personal de negocio del usuario. Tu función es conv
 - Zona horaria: Europe/Madrid
 - Idioma de respuesta: español
 - Sistema de gestión: Bitrix24 (sincronizado con Google Calendar y Office)
+
+# FECHAS Y HORAS
+Cuando el usuario mencione una hora (ej: "mañana a las 10"), interprétala 
+SIEMPRE como hora local de Madrid (Europe/Madrid). Al rellenar el campo 
+fecha_inicio de crear_evento, usa el formato ISO 8601 CON offset +02:00 
+en verano o +01:00 en invierno. Nunca uses Z (UTC).
 
 # TIPOS DE MATERIAL QUE PROCESAS
 Debes identificar automáticamente qué tipo de input recibes:
@@ -148,10 +155,32 @@ async def process_message(history: list, resumen):
         system_instruction=system_prompt,
         temperature=0.3,
         max_output_tokens=1024,
-    )
-    
-    res_agent = (await client.aio.models.generate_content(model="gemini-3.1-flash-lite", contents=contents, config=config)).text
-    return res_agent
+        tools=[responder_texto, crear_evento],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
+    )        
+    #call = response.function_calls[0] #en lugar de .text, como usamos SOLO tools ahora, es .function_calls
+    #***function_calls es un atajo, recorre response.candidates[0].content.parts y se queda con .function_calls. Como ahora solo usamos tools (por el mode:ANY) nos sirve
+    #function_calls te da una lista de objetos FunctionCall(name='responder_texto', args={'mensaje': 'hola'}) con **call.args accedes a los argumentos de las funciones que gemini quiere ejecutar
+    #EN RESUMEN function_calls devuelve una lista de intentos de llamadas a tools, tu ejecutas las que quieras (si no todas, con un for)
+    #return responder_texto(**call.args) # <<<--- exactamente, accedes a los argumentos de la funcion que gemini quiso ejecutar y se los pasas a esa misma funcion 
+    MAX_ITERACIONES = 8
+    for _ in range(MAX_ITERACIONES):
+        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite", contents=contents, config=config)
+        function_responses = []  # acumulamos resultados de tools no-terminales
+        for call in response.function_calls:
+            # Tool TERMINAL: cierra el turno hablando con el usuario
+            if call.name == "responder_texto":
+                return responder_texto(**call.args)
+            # Tool NO-TERMINAL: ejecutamos y guardamos el resultado para el modelo
+            if call.name == "crear_evento":
+                resultado = crear_evento(**call.args)
+                function_responses.append(types.Part.from_function_response(name=call.name, response=resultado,))
+         # Devolvemos los resultados al modelo y volvemos a iterar para que decida
+        contents.append(response.candidates[0].content)
+        contents.append(types.Content(role="user", parts=function_responses))
+
+    return "El agente no pudo resolver la petición, reformula por favor."
 
 async def summarize(history: list, resumen_previo: str = ""):
     lineas = []
@@ -198,6 +227,6 @@ async def summarize(history: list, resumen_previo: str = ""):
     contents.append(content)
     config = types.GenerateContentConfig(
         temperature=0.2,         
-        max_output_tokens=512,
-    )
+        max_output_tokens=512
+        )
     return (await client.aio.models.generate_content(model="gemini-3.1-flash-lite", contents=contents, config=config)).text
