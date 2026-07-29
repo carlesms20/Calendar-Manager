@@ -3,7 +3,7 @@ from os import getenv
 from dotenv import load_dotenv
 import asyncio
 from google.genai import types
-from tools import responder_texto, crear_evento
+from tools import responder_texto, crear_evento, confirmar_evento_pendiente
 
 load_dotenv()
 TOKEN = getenv("API_GEMINI")
@@ -51,6 +51,35 @@ Cuando recibas texto largo, oral o desestructurado:
 2. Divide el contenido en bloques lógicos separados (no mezcles varias tareas en una)
 3. Determina el formato de salida más útil (tarea Bitrix, to-do, mensaje, action plan, etc.)
 4. Haz preguntas de aclaración SOLO si son realmente necesarias, cortas y concretas
+
+# FLUJO DE CREACIÓN DE EVENTOS (OBLIGATORIO)
+Nunca creas un evento sin confirmación explícita del usuario. El flujo es:
+
+1. Cuando el usuario pida agendar algo, llama a crear_evento con los datos
+   que hayas inferido. crear_evento SOLO PREPARA el evento, no lo crea aún.
+2. Llama a responder_texto mostrando el resumen del evento al usuario en
+   lenguaje natural y pídele confirmación clara ("¿Confirmo?").
+3. Si el usuario confirma ("sí", "vale", "dale"), llama a
+   confirmar_evento_pendiente para crearlo en Bitrix.
+4. Si el usuario rechaza ("no", "cancela"), responde con responder_texto
+   informándole que no se creará. No llames a ninguna otra tool.
+5. Si pide cambios, llama a crear_evento de nuevo con los datos actualizados.
+   El pendiente anterior se sobrescribe automáticamente.
+
+# INFERENCIA DE CAMPOS AL PREPARAR EVENTOS
+Rellena todos los campos que puedas inferir del contexto. Solo pregunta lo
+que no puedas deducir razonablemente:
+
+- duracion_min: si no se menciona, usa defaults por tipo de actividad:
+  llamada → 10, reunión → 60, café → 30. Otro → pregunta si no está claro.
+- prioridad: si no se menciona, asume "media". NO preguntes por esto.
+- categoria: intenta inferir. Trabajo/cliente/proveedor/empleado → "empresa".
+  Personal (médico, gimnasio, familia) → "personal". Si mencionan a alguien
+  por nombre sin contexto, asume "empresa". Si sigue sin estar claro, pregunta.
+- tipo_actividad: infiere de la palabra usada (reunión, llamada, café...).
+- involucrado: si categoria=empresa y no se menciona con quién, PREGUNTA antes
+  de llamar a crear_evento. Es obligatorio para eventos de empresa.
+- descripcion: rellénala solo si el usuario da contexto adicional útil.
 
 # FORMATO ESTÁNDAR DE TAREA BITRIX
 Cuando conviertas algo en tarea, usa esta estructura:
@@ -155,7 +184,7 @@ async def process_message(history: list, resumen):
         system_instruction=system_prompt,
         temperature=0.3,
         max_output_tokens=1024,
-        tools=[responder_texto, crear_evento],
+        tools=[responder_texto, crear_evento, confirmar_evento_pendiente],       
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
     )        
@@ -174,8 +203,11 @@ async def process_message(history: list, resumen):
                 return responder_texto(**call.args)
             # Tool NO-TERMINAL: ejecutamos y guardamos el resultado para el modelo
             if call.name == "crear_evento":
-                resultado = crear_evento(**call.args)
-                function_responses.append(types.Part.from_function_response(name=call.name, response=resultado,))
+                resultado = await crear_evento(**call.args)   # ← el await es nuevo
+                function_responses.append(types.Part.from_function_response(name=call.name,response=resultado,))
+            if call.name == "confirmar_evento_pendiente":
+                resultado = await confirmar_evento_pendiente(**call.args)
+                function_responses.append(types.Part.from_function_response(name=call.name, response=resultado))
          # Devolvemos los resultados al modelo y volvemos a iterar para que decida
         contents.append(response.candidates[0].content)
         contents.append(types.Content(role="user", parts=function_responses))

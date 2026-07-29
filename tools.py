@@ -1,5 +1,8 @@
 from datetime import datetime
 from models import Evento
+from bitrix import crear_evento_bitrix, BitrixError
+
+_EVENTO_PENDIENTE: Evento | None = None
 
 def responder_texto(mensaje: str) -> str:
     """Termina el turno respondiendo al usuario con un mensaje.
@@ -13,13 +16,23 @@ def responder_texto(mensaje: str) -> str:
     print(f"TOOL: responder_texto ejecutada")
     return mensaje
 
-def crear_evento(nombre: str, duracion_min: int, fecha_inicio: datetime, categoria: str, prioridad: str, involucrado: str = "", descripcion: str = "", fecha_limite: datetime | None = None, tipo_actividad: str = "",) -> dict:
-    """Crea un evento en el calendario del usuario.
+async def crear_evento(
+    nombre: str,
+    duracion_min: int,
+    fecha_inicio: datetime,
+    categoria: str,
+    prioridad: str,
+    involucrado: str = "",
+    descripcion: str = "",
+    fecha_limite: datetime | None = None,
+    tipo_actividad: str = "",
+) -> dict:
+    """Prepara un evento para el calendario del usuario.
 
-    Úsala cuando el usuario pida agendar algo (reunión, llamada, tarea puntual).
-    Rellena todos los campos que puedas inferir del contexto. Si falta algún
-    dato crítico (fecha, duración, o involucrado en eventos de empresa),
-    llama antes a pedir_aclaracion.
+    IMPORTANTE: esta tool NO crea el evento en Bitrix. Solo lo prepara y lo
+    guarda como pendiente de confirmación. Después de llamarla, muestra el
+    resumen al usuario con responder_texto y pídele confirmación explícita.
+    Solo si el usuario confirma, llama a confirmar_evento_pendiente.
 
     Args:
         nombre: título corto del evento.
@@ -32,6 +45,8 @@ def crear_evento(nombre: str, duracion_min: int, fecha_inicio: datetime, categor
         fecha_limite: fecha tope opcional, posterior a fecha_inicio.
         tipo_actividad: reunion, llamada, tarea admin, etc.
     """
+    global _EVENTO_PENDIENTE
+
     evento = Evento(
         nombre=nombre,
         duracion_min=duracion_min,
@@ -43,17 +58,56 @@ def crear_evento(nombre: str, duracion_min: int, fecha_inicio: datetime, categor
         fecha_limite=fecha_limite,
         tipo_actividad=tipo_actividad,
     )
-    print(f"TOOL: crear_evento ejecutada: {evento.model_dump()}")
+    _EVENTO_PENDIENTE = evento
+    print(f"TOOL: crear_evento (pendiente): {evento.model_dump()}")
+
     return {
-    "ok": True,
-    "mensaje": "Evento validado correctamente (STUB — aún no se ha creado en Bitrix).",
-    "evento": evento.model_dump(mode="json"),
+        "ok": True,
+        "pendiente_confirmacion": True,
+        "mensaje": "Evento preparado. Muestra el resumen al usuario y pide confirmación explícita antes de llamar a confirmar_evento_pendiente.",
+        "evento": evento.model_dump(mode="json"),
     }
 
-#def consultar_tareas(filtros):
+async def confirmar_evento_pendiente() -> dict:
+    """Crea en Bitrix el evento que estaba pendiente de confirmación.
+
+    Úsala SOLO cuando el usuario ha confirmado explícitamente el evento
+    que le acabas de proponer (respuestas tipo "sí", "vale", "dale",
+    "confirmar", "hazlo", "adelante").
+
+    Si el usuario NO ha confirmado o quiere cambios, NO llames a esta tool.
+    """
+    global _EVENTO_PENDIENTE
+
+    if _EVENTO_PENDIENTE is None:
+        return {
+            "ok": False,
+            "mensaje": "No hay ningún evento pendiente de confirmar.",
+        }
+
+    evento = _EVENTO_PENDIENTE
+    _EVENTO_PENDIENTE = None
+
+    print(f"TOOL: confirmar_evento_pendiente ejecutada")
+
+    try:
+        event_id = await crear_evento_bitrix(evento)
+    except BitrixError as e:
+        return {
+            "ok": False,
+            "mensaje": f"Bitrix rechazó el evento: {e}",
+            "evento": evento.model_dump(mode="json"),
+        }
+
+    return {
+        "ok": True,
+        "mensaje": "Evento creado correctamente en Bitrix.",
+        "bitrix_id": event_id,
+        "evento": evento.model_dump(mode="json"),
+    }
+
+#def consultar_eventos(fecha_inicio: datetime | None = None, fecha_fin: datetime | None = None, categoria: str | None = None, texto_libre: str | None = None,) -> dict:
 
 #def modificar_tarea(id, cambios):
 
 #def pedir_aclaracion(pregunta):
-
-#def responder_texto(mensaje):
