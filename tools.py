@@ -112,6 +112,14 @@ async def modificar_evento(
             "mensaje": f"No existe un evento con id {id}. Usa consultar_eventos para verificar.",
         }
 
+    # Gemini nos manda datetimes serializados como string. Coercemos aquí
+    # para que en el buffer siempre haya datetime, no str.
+    if isinstance(fecha_inicio, str):
+        try:
+            fecha_inicio = datetime.fromisoformat(fecha_inicio)
+        except ValueError:
+            return {"ok": False, "mensaje": f"Fecha inválida: '{fecha_inicio}'."}
+
     cambios = {}
     if nombre is not None: cambios["nombre"] = nombre
     if fecha_inicio is not None: cambios["fecha_inicio"] = fecha_inicio
@@ -237,14 +245,16 @@ async def confirmar_operaciones_pendientes() -> dict:
             elif tipo == "eliminar":
                 await eliminar_evento_bitrix(payload["id"])
                 eliminados.append({"bitrix_id": payload["id"], "nombre": payload["nombre"]})
-        except BitrixError as e:
-            fallidos.append({"tipo": tipo, "error": str(e)})
+        except Exception as e:
+            fallidos.append({"tipo": tipo, "error": f"{type(e).__name__}: {e}"})
 
     print(
-        f"TOOL: confirmar_operaciones_pendientes: "
-        f"{len(creados)} creados, {len(modificados)} modificados, "
-        f"{len(eliminados)} eliminados, {len(fallidos)} fallidos"
+    f"TOOL: confirmar_operaciones_pendientes: "
+    f"{len(creados)} creados, {len(modificados)} modificados, "
+    f"{len(eliminados)} eliminados, {len(fallidos)} fallidos"
     )
+    for f in fallidos:
+        print(f"  FALLIDO ({f['tipo']}): {f['error']}")
 
     return {
         "ok": len(fallidos) == 0,

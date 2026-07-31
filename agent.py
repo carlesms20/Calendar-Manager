@@ -16,7 +16,7 @@ from tools import (
 
 load_dotenv()
 TOKEN = getenv("API_GEMINI")
-model = "gemini-3.1-flash-lite"
+model = "gemini-3.5-flash-lite"
 client = genai.Client(api_key=TOKEN)
 
 from datetime import datetime
@@ -279,4 +279,4 @@ async def summarize(history: list, resumen_previo: str = ""):
         temperature=0.2,         
         max_output_tokens=512
         )
-    return (await client.aio.models.generate_content(model="gemini-3.1-flash-lite", contents=contents, config=config)).text
+    return (await client.aio.models.generate_content(model="gemini-3.5-flash-lite", contents=contents, config=config)).text

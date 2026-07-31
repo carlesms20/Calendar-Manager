@@ -137,6 +137,14 @@ async def consultar_eventos_bitrix(
 
     return await solicitud("calendar.event.get", params)
 
+def _parse_bitrix_date(s: str) -> datetime:
+    """Bitrix devuelve fechas en 'dd.mm.YYYY HH:MM:SS' (formato europeo).
+    A veces también en ISO 8601 según el endpoint. Aceptamos ambos."""
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
+
 async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -> None:
     """Modifica un evento existente en Bitrix. Merge de campos: los que
     están en `cambios` reemplazan, el resto se mantiene desde
@@ -153,8 +161,8 @@ async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -
     nombre = cambios.get("nombre", evento_actual.get("NAME"))
 
     # Fechas: recalculamos siempre from y to a partir de lo disponible
-    fecha_inicio_original = datetime.fromisoformat(evento_actual["DATE_FROM"])
-    fecha_fin_original = datetime.fromisoformat(evento_actual["DATE_TO"])
+    fecha_inicio_original = _parse_bitrix_date(evento_actual["DATE_FROM"])
+    fecha_fin_original = _parse_bitrix_date(evento_actual["DATE_TO"])
     duracion_original_min = int((fecha_fin_original - fecha_inicio_original).total_seconds() / 60)
 
     fecha_inicio = cambios.get("fecha_inicio", fecha_inicio_original)
