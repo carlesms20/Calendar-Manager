@@ -48,7 +48,7 @@ class Evento(BaseModel):
     categoria: Categoria           # "personal" | "empresa"
     prioridad: Prioridad           # "alta" | "media" | "baja" — la calcula el agente
 
-    # condicional (obligatorio si categoria == empresa, ver validator abajo)
+    # opcional — persona o grupo con quien es el evento
     involucrado: str = ""
 
     # opcionales
@@ -56,32 +56,6 @@ class Evento(BaseModel):
     fecha_limite: datetime | None = None
     tipo_actividad: str = ""       # "reunion", "llamada", "tarea admin", etc.
     eisenhower: Eisenhower | None = None
-
-    @field_validator("fecha_inicio")
-    @classmethod
-    def fecha_inicio_no_pasada(cls, v):
-        if v < datetime.now():
-            raise ValueError("La fecha de inicio no puede estar en el pasado")
-        return v
-
-    @field_validator("fecha_limite")
-    @classmethod
-    def fecha_limite_no_pasada(cls, v):
-        if v is not None and v < datetime.now():
-            raise ValueError("La fecha límite no puede estar en el pasado")
-        return v
-
-    @model_validator(mode="after")
-    def empresa_requiere_involucrado(self):
-        if self.categoria == Categoria.EMPRESA and not self.involucrado:
-            raise ValueError("Los eventos de empresa requieren un involucrado")
-        return self
-
-    @model_validator(mode="after")
-    def fecha_limite_posterior_a_inicio(self):
-        if self.fecha_limite is not None and self.fecha_limite < self.fecha_inicio:
-            raise ValueError("La fecha límite no puede ser anterior a la fecha de inicio")
-        return self
 
     @field_validator("fecha_inicio")
     @classmethod
@@ -103,6 +77,13 @@ class Evento(BaseModel):
         if v < datetime.now(TZ_LOCAL):
             raise ValueError("La fecha límite no puede estar en el pasado")
         return v
+
+    @model_validator(mode="after")
+    def fecha_limite_posterior_a_inicio(self):
+        if self.fecha_limite is not None and self.fecha_limite < self.fecha_inicio:
+            raise ValueError("La fecha límite no puede ser anterior a la fecha de inicio")
+        return self
+
 
 class RespuestaAgente(BaseModel):
     """Envoltorio de respuesta con tipo de acción + payload.
