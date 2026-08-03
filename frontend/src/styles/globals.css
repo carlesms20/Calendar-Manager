@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/*
+ * Tema oscuro con acento verde tenue.
+ * Variables CSS pensadas para que David pueda sobreescribirlas
+ * desde el dashboard si mas adelante quiere unificar tokens.
+ */
+@theme {
+  --font-body: "Geist", system-ui, -apple-system, sans-serif;
+  --font-display: "Instrument Serif", Georgia, serif;
+
+  --color-bg: #0a0d10;
+  --color-surface: #14181c;
+  --color-surface-hover: #1a1f24;
+  --color-border: #232a31;
+  --color-text: #e4e7eb;
+  --color-text-muted: #8b9199;
+  --color-text-faint: #5f6670;
+  --color-accent: #10b981;
+  --color-accent-soft: rgba(16, 185, 129, 0.15);
+  --color-user-bubble: rgba(16, 185, 129, 0.12);
+  --color-user-bubble-border: rgba(16, 185, 129, 0.3);
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar minimalista */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-faint);
+}
+
+/* Animacion de puntos suspensivos para "escribiendo..." */
+@keyframes dot-pulse {
+  0%, 60%, 100% { opacity: 0.3; }
+  30% { opacity: 1; }
+}
+.dot-1 { animation: dot-pulse 1.4s infinite; }
+.dot-2 { animation: dot-pulse 1.4s infinite 0.2s; }
+.dot-3 { animation: dot-pulse 1.4s infinite 0.4s; }
+
+/* Animacion de pulso para el boton de grabacion */
+@keyframes recording-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+}
+.recording {
+  animation: recording-pulse 1.5s infinite;
+  background: #ef4444 !important;
+}
