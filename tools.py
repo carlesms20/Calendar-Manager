@@ -40,17 +40,24 @@ async def crear_evento(
     veces para preparar múltiples eventos. Todos se crearán cuando el
     usuario confirme con confirmar_operaciones_pendientes.
     """
-    evento = Evento(
-        nombre=nombre,
-        duracion_min=duracion_min,
-        fecha_inicio=fecha_inicio,
-        categoria=categoria,
-        prioridad=prioridad,
-        involucrado=involucrado,
-        descripcion=descripcion,
-        fecha_limite=fecha_limite,
-        tipo_actividad=tipo_actividad,
-    )
+    try:
+        evento = Evento(
+            nombre=nombre,
+            duracion_min=duracion_min,
+            fecha_inicio=fecha_inicio,
+            categoria=categoria,
+            prioridad=prioridad,
+            involucrado=involucrado,
+            descripcion=descripcion,
+            fecha_limite=fecha_limite,
+            tipo_actividad=tipo_actividad,
+        )
+    except Exception as e:
+        print(f"TOOL: crear_evento validacion fallida: {type(e).__name__}: {e}")
+        return {
+            "ok": False,
+            "mensaje": f"No he podido preparar el evento: {e}. Corrige los datos y vuelve a intentarlo.",
+        }
 
     # Dedup: misma creación (nombre + fecha_inicio) ya en buffer → ignorar
     for op in _OPERACIONES_PENDIENTES:
