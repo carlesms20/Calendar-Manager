@@ -20,28 +20,12 @@ dp = Dispatcher() #enruta los mensajes que llegan, según el tipo
 
 
 async def procesar_texto_usuario(texto: str, message: Message):
-    """Pipeline comun para texto y audio ya transcrito.
-    Antes estaba solo en text_handler; se extrae aqui para que audio_handler
-    tambien lo reutilice sin duplicar codigo."""
-    await memory.save_message("user", texto) #guarda mensaje en el historial, para memoria de chat
-    if memory.check_history():
-        history = memory.get_history()
-        old_msg = history[:8]
-        resumen_previo = memory.get_resumen()
-        nuevo_resumen = await agent.summarize(old_msg, resumen_previo)
-        memory.set_resumen(nuevo_resumen)
-        memory.del_history()
-
-    prompt = memory.get_history()
-    resumen = memory.get_resumen()
-    respuesta = await agent.process_message(prompt, resumen)
-    await memory.save_message("model", respuesta)
+    """Delega en agent.procesar_input y responde por Telegram."""
+    respuesta = await agent.procesar_input(texto)
     await message.answer(respuesta)
-
 
 async def text_handler(message: Message):
     await procesar_texto_usuario(message.text, message)
-
 
 async def audio_handler(message: Message):
     #Descargar el fichero de voz de Telegram usando el file_id
@@ -61,7 +45,6 @@ async def audio_handler(message: Message):
 
     #El texto transcrito entra al mismo pipeline que un mensaje escrito
     await procesar_texto_usuario(texto, message)
-
 
 async def file_handler(message: Message):
     print("He recibido file.")

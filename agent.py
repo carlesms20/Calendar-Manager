@@ -3,6 +3,7 @@ from os import getenv
 from dotenv import load_dotenv
 import asyncio
 from google.genai import types
+import memory
 from tools import (
     responder_texto,
     crear_evento,
@@ -175,7 +176,7 @@ async def process_message(history: list, resumen):
     #return responder_texto(**call.args) # <<<--- exactamente, accedes a los argumentos de la funcion que gemini quiso ejecutar y se los pasas a esa misma funcion 
     MAX_ITERACIONES = 8
     for iteracion in range(MAX_ITERACIONES):
-        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite", contents=contents, config=config)
+        response = await client.aio.models.generate_content(model="gemini-3.5-flash-lite", contents=contents, config=config)
 
         calls = list(response.function_calls or [])
         # [D] Log de todo lo que Gemini pidió llamar en este turno
@@ -280,3 +281,29 @@ async def summarize(history: list, resumen_previo: str = ""):
         max_output_tokens=512
         )
     return (await client.aio.models.generate_content(model="gemini-3.5-flash-lite", contents=contents, config=config)).text
+
+async def procesar_input(texto: str) -> str:
+    """Pipeline completo del agente: guarda entrada del usuario, gestiona
+    resumen si toca, llama al brain con tools, guarda respuesta y devuelve
+    el texto final. Es la funcion que comparten el bot Telegram y el
+    endpoint HTTP: ambos son solo capas de transporte sobre esto.
+    """
+    try:
+        await memory.save_message("user", texto)
+
+        if memory.check_history():
+            history = memory.get_history()
+            old_msg = history[:8]
+            resumen_previo = memory.get_resumen()
+            nuevo_resumen = await summarize(old_msg, resumen_previo)
+            memory.set_resumen(nuevo_resumen)
+            memory.del_history()
+
+        prompt = memory.get_history()
+        resumen = memory.get_resumen()
+        respuesta = await process_message(prompt, resumen)
+        await memory.save_message("model", respuesta)
+        return respuesta
+    except Exception as e:
+        print(f"AGENT: error en procesar_input: {type(e).__name__}: {e}")
+        return "He tenido un problema procesando tu mensaje. ¿Puedes intentarlo de nuevo o reformularlo?"
