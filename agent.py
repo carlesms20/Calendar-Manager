@@ -339,7 +339,7 @@ async def summarize(history: list, resumen_previo: str = ""):
     contents.append(content)
     config = types.GenerateContentConfig(
         temperature=0.2,         
-        max_output_tokens=512
+        max_output_tokens=1024
         )
     response = await _llamar_gemini({"contents": contents,"config": config,})
     return response.text
