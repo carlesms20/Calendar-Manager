@@ -77,7 +77,7 @@ async def _procesar_y_detectar_cambios(texto: str) -> RespuestaAgente:
     Alternativa mas robusta a futuro: que confirmar_operaciones_pendientes
     guarde un flag en un modulo compartido.
     """
-    reply = await agent.procesar_input(texto)
+    reply = await agent.procesar_input("alexander", texto)
 
     # Deteccion heuristica: buscamos frases tipicas en la respuesta que
     # indican que el agente ejecuto algo. No es 100% preciso pero acierta

@@ -21,7 +21,7 @@ dp = Dispatcher() #enruta los mensajes que llegan, según el tipo
 
 async def procesar_texto_usuario(texto: str, message: Message):
     """Delega en agent.procesar_input y responde por Telegram."""
-    respuesta = await agent.procesar_input(texto)
+    respuesta = await agent.procesar_input("alexander", texto)
     await message.answer(respuesta)
 
 async def text_handler(message: Message):

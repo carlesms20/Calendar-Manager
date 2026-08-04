@@ -15,12 +15,73 @@ from tools import (
     listar_eventos_preparados,
 )
 
+# Modelos con fallback ante 503. Si el primario da problemas de sobrecarga
+# tras 3 reintentos, cambia al secundario. Ambos aceptan tools y multimodal.
+MODELO_PRIMARIO = "gemini-3.5-flash-lite"
+MODELO_FALLBACK = "gemini-3.1-flash-lite"
+
 load_dotenv()
 TOKEN = getenv("API_GEMINI")
 model = "gemini-3.5-flash-lite"
 client = genai.Client(api_key=TOKEN)
 
 from datetime import datetime
+
+async def _llamar_gemini(kwargs: dict, max_intentos_por_modelo: int = 3, base_delay: float = 2.0):
+    """Llama a client.aio.models.generate_content con reintentos + fallback.
+
+    Estrategia:
+    1. Intenta con MODELO_PRIMARIO. Si da 503/UNAVAILABLE/overloaded,
+       espera con backoff exponencial (2s, 4s, 8s) y reintenta hasta 3 veces.
+    2. Si tras los 3 intentos sigue fallando, cambia a MODELO_FALLBACK
+       y repite la misma cadena de reintentos.
+    3. Si ambos modelos agotan sus reintentos, propaga la excepcion.
+
+    Los errores NO transitorios (auth, mal request, etc.) se propagan
+    inmediatamente sin reintentar.
+
+    kwargs: dict con los argumentos para generate_content SIN 'model'.
+            El modelo lo inyecta este helper.
+    """
+    ultimo_error = None
+    for modelo in (MODELO_PRIMARIO, MODELO_FALLBACK):
+        for intento in range(max_intentos_por_modelo):
+            try:
+                return await client.aio.models.generate_content(model=modelo, **kwargs)
+            except Exception as e:
+                mensaje = str(e).lower()
+                es_transitorio = (
+                    "503" in mensaje
+                    or "unavailable" in mensaje
+                    or "overloaded" in mensaje
+                )
+                if not es_transitorio:
+                    # Errores no transitorios (auth, mal request, etc.) no
+                    # se reintentan, se propagan directamente.
+                    raise
+
+                ultimo_error = e
+                if intento < max_intentos_por_modelo - 1:
+                    delay = base_delay * (2 ** intento)
+                    print(
+                        f"AGENT: 503 con {modelo}, reintento en {delay}s "
+                        f"({intento + 1}/{max_intentos_por_modelo})"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                # Ultimo intento agotado con este modelo
+                if modelo == MODELO_PRIMARIO:
+                    print(
+                        f"AGENT: {MODELO_PRIMARIO} agotado, "
+                        f"cambio a {MODELO_FALLBACK}"
+                    )
+                # Si es el fallback, salimos del bucle interno y el
+                # externo detecta que ya no quedan modelos.
+
+    # Ambos modelos han agotado sus reintentos
+    print(f"AGENT: ambos modelos agotados, error final: {ultimo_error}")
+    raise ultimo_error
 
 def get_system_prompt() -> str:
     fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -176,7 +237,7 @@ async def process_message(history: list, resumen):
     #return responder_texto(**call.args) # <<<--- exactamente, accedes a los argumentos de la funcion que gemini quiso ejecutar y se los pasas a esa misma funcion 
     MAX_ITERACIONES = 8
     for iteracion in range(MAX_ITERACIONES):
-        response = await client.aio.models.generate_content(model="gemini-3.5-flash-lite", contents=contents, config=config)
+        response = await _llamar_gemini({"contents": contents,"config": config,})
 
         calls = list(response.function_calls or [])
         # [D] Log de todo lo que Gemini pidió llamar en este turno
@@ -280,29 +341,30 @@ async def summarize(history: list, resumen_previo: str = ""):
         temperature=0.2,         
         max_output_tokens=512
         )
-    return (await client.aio.models.generate_content(model="gemini-3.5-flash-lite", contents=contents, config=config)).text
+    response = await _llamar_gemini({"contents": contents,"config": config,})
+    return response.text
 
-async def procesar_input(texto: str) -> str:
+async def procesar_input(user_id: str, texto: str) -> str:
     """Pipeline completo del agente: guarda entrada del usuario, gestiona
     resumen si toca, llama al brain con tools, guarda respuesta y devuelve
     el texto final. Es la funcion que comparten el bot Telegram y el
     endpoint HTTP: ambos son solo capas de transporte sobre esto.
     """
     try:
-        await memory.save_message("user", texto)
+        await memory.save_message(user_id, "user", texto)
 
-        if memory.check_history():
-            history = memory.get_history()
+        if await memory.check_history(user_id):
+            history = await memory.get_history(user_id)
             old_msg = history[:8]
-            resumen_previo = memory.get_resumen()
+            resumen_previo = await memory.get_resumen(user_id)
             nuevo_resumen = await summarize(old_msg, resumen_previo)
-            memory.set_resumen(nuevo_resumen)
-            memory.del_history()
+            await memory.set_resumen(user_id, nuevo_resumen)
+            await memory.del_history(user_id, n=8)
 
-        prompt = memory.get_history()
-        resumen = memory.get_resumen()
+        prompt = await memory.get_history(user_id)
+        resumen = await memory.get_resumen(user_id)
         respuesta = await process_message(prompt, resumen)
-        await memory.save_message("model", respuesta)
+        await memory.save_message(user_id, "model", respuesta)
         return respuesta
     except Exception as e:
         print(f"AGENT: error en procesar_input: {type(e).__name__}: {e}")
