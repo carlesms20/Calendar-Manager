@@ -13,6 +13,7 @@ from tools import (
     cancelar_operaciones_pendientes,
     consultar_eventos,
     listar_eventos_preparados,
+    consultar_huecos_libres
 )
 
 # Modelos con fallback ante 503. Si el primario da problemas de sobrecarga
@@ -110,6 +111,9 @@ Mapeo pregunta → tool:
 - "qué tienes preparado", "qué ibas a confirmar", "recuérdame lo que 
   estabas por agendar" (referido al buffer del turno, sin confirmar aún) 
   → listar_eventos_preparados.
+- "cuándo puedo agendar X", "cuándo tengo hueco para Y", "propóneme
+  cuándo hacer Z", cualquier pregunta de disponibilidad para meter
+  algo nuevo → consultar_huecos_libres.
 
 La palabra "pendiente" es ambigua. Si acabamos de preparar eventos y aún 
 no se han confirmado, es el buffer → listar_eventos_preparados. En 
@@ -173,8 +177,10 @@ Rellena lo que puedas inferir. Solo pregunta lo indeducible:
 
 - duracion_min: si no se menciona → llamada 10, reunión 60, café 30. 
   Otro tipo sin claridad → pregunta.
-- prioridad: asume "media" siempre. NO preguntes por esto. El usuario 
-  puede cambiarla explícitamente si quiere.
+- prioridad: NO la rellenes al llamar a crear_evento. Se calcula 
+  automáticamente a partir de involucrado y fecha_limite. SOLO pásala 
+  si el usuario la fija explícitamente en el mensaje ("márcala como 
+  alta", "esto es urgente", "baja prioridad").
 - categoria: trabajo/cliente/proveedor/empleado → "empresa". Médico, 
   gimnasio, familia, pareja → "personal". Si mencionan a alguien por 
   nombre sin contexto claro, asume "empresa".
@@ -182,6 +188,31 @@ Rellena lo que puedas inferir. Solo pregunta lo indeducible:
 - involucrado: si categoria=empresa y no se menciona con quién, 
   PREGUNTA antes de llamar a crear_evento. Es obligatorio.
 - descripcion: solo si el usuario da contexto adicional útil.
+
+# HUECOS LIBRES: OFRECE POCAS OPCIONES
+consultar_huecos_libres devuelve TODOS los huecos válidos del rango.
+Puede devolver muchos. NO los listes todos al usuario: elige 3-4 como
+máximo, los más prácticos según contexto (mañana temprano si suele 
+reunirse a esa hora, o los primeros disponibles si hay urgencia).
+Devuelve las etiquetas tal cual las da la tool.
+
+Defaults y flexibilidad:
+- Por defecto busca L-S en horario laboral (09:00-20:00).
+- Si el usuario pide huecos en domingo, pasa incluir_domingo=True.
+- Si el usuario pide huecos por la noche, madrugada, o antes de las 9
+  o después de las 20, pasa incluir_fuera_horario=True.
+- Si no lo pide explícitamente, NO pases estos flags.
+
+Antes de proponer huecos para una operación de calendario nueva 
+(especialmente en eventos de empresa o alta prioridad), llama a esta
+tool para saber qué está libre. No propongas horas de memoria.
+
+Si total=0, el resultado incluye 'mensaje' explicando el motivo. Informa
+al usuario directamente con responder_texto en el siguiente turno. NO
+vuelvas a llamar a consultar_huecos_libres ni a consultar_eventos como
+"verificacion" — el resultado ya es definitivo. Ejemplo de respuesta:
+"El 12 no tienes ningun hueco disponible, lo tienes bloqueado como dia
+libre."
 
 # ESTILO DE RESPUESTA
 - Claro, directivo, sin relleno. Tono de management práctico.
@@ -225,6 +256,7 @@ async def process_message(history: list, resumen):
             confirmar_operaciones_pendientes,
             cancelar_operaciones_pendientes,
             consultar_eventos,
+            consultar_huecos_libres,  
             listar_eventos_preparados,
         ],        
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -265,6 +297,8 @@ async def process_message(history: list, resumen):
                     resultado = await cancelar_operaciones_pendientes(**call.args)
                 elif call.name == "consultar_eventos":
                     resultado = await consultar_eventos(**call.args)
+                elif call.name == "consultar_huecos_libres":
+                    resultado = await consultar_huecos_libres(**call.args)
                 elif call.name == "listar_eventos_preparados":
                     resultado = await listar_eventos_preparados(**call.args)
                 else:

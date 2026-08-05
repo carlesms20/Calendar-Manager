@@ -300,6 +300,7 @@ export default function Calendar({
                 const rect = calcularRectangulo(ev);
                 if (!rect) return null;
                 const esSeleccionado = eventoSeleccionado?.evento.id === ev.id;
+                const estilos = estilosPorPrioridad(ev.prioridad);
                 return (
                   <button
                     key={ev.id}
@@ -311,10 +312,10 @@ export default function Calendar({
                     style={{
                       top: `${rect.top}px`,
                       height: `${rect.height}px`,
-                      background: "var(--color-accent-soft)",
-                      borderLeft: "2px solid var(--color-accent)",
+                      background: estilos.background,
+                      borderLeft: `2px solid ${estilos.borderColor}`,
                       outline: esSeleccionado
-                        ? "1px solid var(--color-accent)"
+                        ? `1px solid ${estilos.borderColor}`
                         : "none",
                       cursor: "pointer",
                     }}
@@ -440,4 +441,31 @@ function formatearRango(inicio: Date, fin: Date): string {
 
 function formatearHora(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// Devuelve los colores CSS para pintar un evento segun su prioridad.
+// Si no viene prioridad (evento externo sin importance), cae en "media"
+// como neutro razonable.
+function estilosPorPrioridad(prioridad?: string): {
+  background: string;
+  borderColor: string;
+} {
+  switch (prioridad) {
+    case "alta":
+      return {
+        background: "var(--color-prio-alta-soft)",
+        borderColor: "var(--color-prio-alta)",
+      };
+    case "baja":
+      return {
+        background: "var(--color-prio-baja-soft)",
+        borderColor: "var(--color-prio-baja)",
+      };
+    case "media":
+    default:
+      return {
+        background: "var(--color-prio-media-soft)",
+        borderColor: "var(--color-prio-media)",
+      };
+  }
 }

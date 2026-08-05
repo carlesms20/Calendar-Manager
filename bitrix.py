@@ -3,11 +3,13 @@ from os import getenv
 from dotenv import load_dotenv
 from datetime import timedelta
 from models import Evento, Prioridad
-from datetime import datetime
+from datetime import datetime, timedelta
+import asyncio
 
 load_dotenv()
 WEBHOOK = getenv("WEBHOOK_BITRIX")
 USER_ID = int(getenv("BITRIX_USER_ID", "0"))
+_SECCIONES_CACHE: list[int] | None = None
 
 class BitrixError(Exception):
     """Errores de negocio o red de Bitrix."""
@@ -96,6 +98,31 @@ async def crear_evento_bitrix(evento: Evento) -> int:
 
     return await solicitud("calendar.event.add", params)
 
+async def obtener_secciones_user() -> list[int]:
+    """Devuelve las IDs de todas las secciones del calendario del user.
+
+    Se cachea a nivel proceso: la primera llamada consulta a Bitrix,
+    el resto son gratis. Si Alexander conecta un nuevo calendario en
+    Bitrix mientras el bot corre, hay que reiniciar el proceso.
+
+    Motivo: calendar.event.get sin parámetro 'section' NO devuelve
+    algunos tipos de eventos (comprobado: días libres con DATE_FROM
+    == DATE_TO). Pasando la lista completa se soluciona.
+    """
+    global _SECCIONES_CACHE
+    if _SECCIONES_CACHE is not None:
+        return _SECCIONES_CACHE
+    try:
+        secciones = await solicitud("calendar.section.get", {"type": "user", "ownerId": USER_ID})
+    except Exception as e:
+        print(f"BITRIX: no pude listar secciones ({e}), sigo sin filtrar")
+        return []
+    if not isinstance(secciones, list):
+        return []
+    _SECCIONES_CACHE = [int(s["ID"]) for s in secciones if "ID" in s]
+    print(f"BITRIX: secciones cacheadas para user {USER_ID}: {_SECCIONES_CACHE}")
+    return _SECCIONES_CACHE
+
 async def consultar_eventos_bitrix(
     fecha_inicio: datetime | str | None = None,
     fecha_fin: datetime | str | None = None,
@@ -126,16 +153,43 @@ async def consultar_eventos_bitrix(
     fecha_inicio = _a_datetime(fecha_inicio)
     fecha_fin = _a_datetime(fecha_fin)
 
-    params = {
-        "type": "user",
-        "ownerId": USER_ID,
-    }
-    if fecha_inicio is not None:
-        params["from"] = fecha_inicio.strftime("%Y-%m-%d")
-    if fecha_fin is not None:
-        params["to"] = fecha_fin.strftime("%Y-%m-%d")
+    secciones = await obtener_secciones_user()
 
-    return await solicitud("calendar.event.get", params)
+    secciones = await obtener_secciones_user()
+
+    # Pedimos a Bitrix con 1 día de margen por cada lado y filtramos en
+    # Python. Motivo: Bitrix descarta eventos de duración cero
+    # (DATE_FROM == DATE_TO) cuyos timestamps caen justo en el borde
+    # del rango pedido — usa comparación estricta, no inclusiva.
+    params = {"type": "user", "ownerId": USER_ID}
+    if secciones:
+        params["section"] = secciones
+    if fecha_inicio is not None:
+        params["from"] = (fecha_inicio - timedelta(days=1)).strftime("%Y-%m-%d")
+    if fecha_fin is not None:
+        params["to"] = (fecha_fin + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    eventos = await solicitud("calendar.event.get", params)
+
+    # Filtrado post-Bitrix por fecha de calendario. Robusto frente a
+    # eventos de duración cero: usamos .date() para que un all-day en el
+    # borde caiga dentro.
+    if fecha_inicio is not None or fecha_fin is not None:
+        filtrados = []
+        for e in eventos:
+            try:
+                date_from = _parse_bitrix_date(e["DATE_FROM"])
+                date_to = _parse_bitrix_date(e["DATE_TO"])
+            except (KeyError, ValueError):
+                continue
+            if fecha_inicio is not None and date_to.date() < fecha_inicio.date():
+                continue
+            if fecha_fin is not None and date_from.date() > fecha_fin.date():
+                continue
+            filtrados.append(e)
+        return filtrados
+
+    return eventos
 
 def _parse_bitrix_date(s: str) -> datetime:
     """Bitrix devuelve fechas en 'dd.mm.YYYY HH:MM:SS' (formato europeo).
@@ -144,6 +198,89 @@ def _parse_bitrix_date(s: str) -> datetime:
         return datetime.fromisoformat(s)
     except ValueError:
         return datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
+
+async def consultar_ocupacion_bitrix(
+    fecha_inicio: datetime | str | None = None,
+    fecha_fin: datetime | str | None = None,
+) -> list[dict]:
+    """Devuelve TODO lo que hace al usuario busy: eventos + absences.
+
+    Combina en paralelo:
+      - calendar.event.get       → eventos con detalle completo (DESCRIPTION,
+                                   IMPORTANCE, ATTENDEES...)
+      - calendar.accessibility.get → todo lo que ocupa al usuario, incluidas
+                                     absences que event.get no ve.
+
+    Deduplica por ID. Los que vienen de event.get tienen prioridad porque
+    llevan DESCRIPTION y demás campos ricos; los que solo aparecen en
+    accessibility (típicamente absences) se añaden tal cual.
+
+    Si accessibility falla, cae gracefully sobre el resultado de event.get:
+    peor caso, comportamiento anterior sin absences.
+    """
+    def _a_datetime(valor):
+        if valor is None or isinstance(valor, datetime):
+            return valor
+        if isinstance(valor, str):
+            try:
+                return datetime.fromisoformat(valor)
+            except ValueError as e:
+                raise BitrixError(f"Fecha inválida '{valor}': {e}") from e
+        raise BitrixError(f"Tipo de fecha no soportado: {type(valor).__name__}")
+
+    fecha_inicio = _a_datetime(fecha_inicio)
+    fecha_fin = _a_datetime(fecha_fin)
+
+    # Params para calendar.event.get (from/to opcionales; Bitrix usa defaults)
+    secciones = await obtener_secciones_user()
+
+    params_event = {"type": "user", "ownerId": USER_ID}
+    if secciones:
+        params_event["section"] = secciones
+    if fecha_inicio is not None:
+        params_event["from"] = (fecha_inicio - timedelta(days=1)).strftime("%Y-%m-%d")
+    if fecha_fin is not None:
+        params_event["to"] = (fecha_fin + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Params para calendar.accessibility.get (from/to obligatorios).
+    # Si no vienen, usamos el rango por defecto de Bitrix (~1 mes atrás, ~3 adelante).
+    ahora = datetime.now()
+    fi_acc = fecha_inicio if fecha_inicio is not None else ahora - timedelta(days=30)
+    ff_acc = fecha_fin if fecha_fin is not None else ahora + timedelta(days=90)
+    params_acc = {
+        "users": [USER_ID],
+        "from": fi_acc.strftime("%Y-%m-%d"),
+        "to": ff_acc.strftime("%Y-%m-%d"),
+    }
+
+    # Llamadas en paralelo. return_exceptions=True nos deja hacer fallback.
+    eventos_res, ocupacion_res = await asyncio.gather(
+        solicitud("calendar.event.get", params_event),
+        solicitud("calendar.accessibility.get", params_acc),
+        return_exceptions=True,
+    )
+    # event.get es el principal: si falla, propagamos.
+    if isinstance(eventos_res, Exception):
+        raise eventos_res
+
+    eventos: list[dict] = eventos_res
+
+    # accessibility es un extra: si falla, avisamos y devolvemos solo event.get.
+    if isinstance(ocupacion_res, Exception):
+        print(f"BITRIX: aviso, accessibility fallo, sigo sin absences: {ocupacion_res}")
+        return eventos
+
+    # accessibility.get devuelve {"user_id_str": [busy_items]}. Extraemos la lista.
+    ocupacion_dict = ocupacion_res if isinstance(ocupacion_res, dict) else {}
+    ocupacion_lista = ocupacion_dict.get(str(USER_ID), [])
+
+    # Merge por ID, priorizando los eventos ricos de event.get.
+    ids_existentes = {str(e.get("ID")) for e in eventos}
+    for extra in ocupacion_lista:
+        if str(extra.get("ID")) not in ids_existentes:
+            eventos.append(extra)
+
+    return eventos
 
 async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -> None:
     """Modifica un evento existente en Bitrix. Merge de campos: los que

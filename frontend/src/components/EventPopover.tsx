@@ -16,6 +16,16 @@ export default function EventPopover({ evento, posicion, onCerrar }: Props) {
   const duracionMin = Math.round((fin.getTime() - inicio.getTime()) / 60000);
   const duracionTexto = formatearDuracion(duracionMin);
 
+  // Chip de prioridad: solo se renderiza si el evento la trae. Los eventos
+  // creados en Bitrix por otras vias pueden no tenerla y no queremos mentir.
+  const infoPrioridad = evento.prioridad
+    ? {
+        alta:  { label: "Alta",  color: "var(--color-prio-alta)"  },
+        media: { label: "Media", color: "var(--color-prio-media)" },
+        baja:  { label: "Baja",  color: "var(--color-prio-baja)"  },
+      }[evento.prioridad] || null
+    : null;
+
   return (
     <div
       className="absolute z-50 w-[260px] rounded-xl p-4 shadow-2xl"
@@ -64,6 +74,19 @@ export default function EventPopover({ evento, posicion, onCerrar }: Props) {
         <span style={{ color: "var(--color-text-faint)" }}>·</span>
         <span>{duracionTexto}</span>
       </div>
+
+      {infoPrioridad && (
+        <div
+          className="mt-2 flex items-center gap-1.5 text-xs"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          <span
+            className="inline-block h-2 w-2 rounded-full"
+            style={{ background: infoPrioridad.color }}
+          />
+          <span>Prioridad {infoPrioridad.label.toLowerCase()}</span>
+        </div>
+      )}
 
       {evento.descripcion && evento.descripcion.trim() && (
         <div

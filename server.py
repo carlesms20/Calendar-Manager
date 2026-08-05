@@ -14,7 +14,8 @@ from pydantic import BaseModel
 import agent
 import voice
 import tools
-from bitrix import consultar_eventos_bitrix, BitrixError
+import tts
+from bitrix import consultar_eventos_bitrix, BitrixError, consultar_ocupacion_bitrix
 
 app = FastAPI(title="Agente SYNCROSFERA")
 
@@ -33,6 +34,9 @@ class MensajeTexto(BaseModel):
     """Payload del endpoint de texto."""
     text: str
 
+class MensajeTTS(BaseModel):
+    """Payload del endpoint TTS."""
+    text: str
 
 class RespuestaAgente(BaseModel):
     """Respuesta que devuelve el agente al frontend.
@@ -52,6 +56,7 @@ class EventoResumen(BaseModel):
     fecha_inicio: str  # ISO 8601
     fecha_fin: str
     descripcion: str = ""
+    prioridad: str = ""  # "alta" | "media" | "baja" | "" si Bitrix no la trae
 
 
 class ListaEventos(BaseModel):
@@ -127,6 +132,34 @@ async def mensaje_audio(audio: UploadFile = File(...)):
         print(f"SERVER: error procesando: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Error procesando el mensaje")
 
+from fastapi.responses import Response
+
+@app.post("/api/tts")
+async def sintetizar_voz(payload: MensajeTTS):
+    """Convierte un texto en audio WAV usando Gemini TTS.
+
+    Free tier: 10 llamadas al dia. El frontend cachea el blob por mensaje
+    para no gastar cuota al pulsar play varias veces sobre el mismo.
+    """
+    if not payload.text.strip():
+        raise HTTPException(status_code=400, detail="El texto no puede estar vacio")
+
+    if len(payload.text) > 5000:
+        # Limite arbitrario para no gastar tokens en respuestas larguisimas.
+        # Gemini acepta hasta 8000 bytes de input, dejamos margen.
+        raise HTTPException(status_code=413, detail="Texto demasiado largo para TTS")
+
+    try:
+        wav_bytes = await tts.sintetizar(payload.text)
+    except Exception as e:
+        mensaje = str(e).lower()
+        if "429" in mensaje or "resource_exhausted" in mensaje or "quota" in mensaje:
+            print(f"SERVER: cuota TTS agotada: {e}")
+            raise HTTPException(status_code=429, detail="Cuota diaria de TTS agotada")
+        print(f"SERVER: error TTS: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error generando el audio")
+
+    return Response(content=wav_bytes, media_type="audio/wav")
 
 @app.get("/api/eventos", response_model=ListaEventos)
 async def listar_eventos(
@@ -152,20 +185,31 @@ async def listar_eventos(
             raise HTTPException(status_code=400, detail="Fechas invalidas, usa ISO 8601")
 
     try:
-        raw = await consultar_eventos_bitrix(desde_dt, hasta_dt)
+        raw = await consultar_ocupacion_bitrix(desde_dt, hasta_dt)
     except BitrixError as e:
         raise HTTPException(status_code=502, detail=f"Bitrix rechazo la peticion: {e}")
 
     # Normalizamos al formato que consume el frontend
+    # Mapeo inverso de bitrix._MAPEO_IMPORTANCIA
+    _IMPORTANCE_A_PRIORIDAD = {"high": "alta", "normal": "media", "low": "baja"}
+
     eventos = []
     for e in raw:
-        # Bitrix devuelve fechas en dd.mm.YYYY HH:MM:SS, hay que parsearlo
-        try:
-            fi = _parsear_fecha_bitrix(e["DATE_FROM"])
-            ff = _parsear_fecha_bitrix(e["DATE_TO"])
-        except (KeyError, ValueError) as err:
-            print(f"SERVER: evento con fecha invalida, salto: {err}")
+        date_from = e.get("DATE_FROM")
+        date_to = e.get("DATE_TO")
+        if not date_from or not date_to:
+            print(f"SERVER: evento sin fechas, salto (ID={e.get('ID', '?')}, NAME={e.get('NAME', '?')})")
             continue
+        try:
+            fi = _parsear_fecha_bitrix(date_from)
+            ff = _parsear_fecha_bitrix(date_to)
+        except ValueError as err:
+            print(f"SERVER: fecha invalida en evento {e.get('ID', '?')}: {err}")
+            continue
+
+        prioridad = _IMPORTANCE_A_PRIORIDAD.get(
+            (e.get("IMPORTANCE") or "").lower(), ""
+        )
 
         eventos.append(EventoResumen(
             id=str(e.get("ID", "")),
@@ -173,6 +217,7 @@ async def listar_eventos(
             fecha_inicio=fi.isoformat(),
             fecha_fin=ff.isoformat(),
             descripcion=e.get("DESCRIPTION", "") or "",
+            prioridad=prioridad,
         ))
 
     return ListaEventos(eventos=eventos)

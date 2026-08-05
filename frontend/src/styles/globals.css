@@ -20,6 +20,16 @@
   --color-accent-soft: rgba(16, 185, 129, 0.15);
   --color-user-bubble: rgba(16, 185, 129, 0.12);
   --color-user-bubble-border: rgba(16, 185, 129, 0.3);
+
+  /* Tokens de prioridad — semáforo sobre patrón fondo-blando + borde-sólido.
+     La "baja" duplica los valores de --color-accent a propósito: si mañana
+     cambiamos el brand, la prioridad baja debe seguir siendo verde-semáforo. */
+  --color-prio-alta: #ef4444;
+  --color-prio-alta-soft: rgba(239, 68, 68, 0.15);
+  --color-prio-media: #f59e0b;
+  --color-prio-media-soft: rgba(245, 158, 11, 0.15);
+  --color-prio-baja: #10b981;
+  --color-prio-baja-soft: rgba(16, 185, 129, 0.15);
 }
 
 html, body, #root {

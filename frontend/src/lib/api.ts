@@ -79,3 +79,24 @@ export async function obtenerEventos(
   const data = await res.json();
   return data.eventos;
 }
+
+/**
+ * Convierte un texto en audio hablado usando el TTS del backend (Gemini).
+ * Devuelve un Blob de audio/wav listo para reproducir con new Audio().
+ * OJO: en free tier el limite es 10 llamadas al dia. En el frontend cacheamos
+ * el blob por mensaje para no gastar cuota al pulsar play varias veces.
+ */
+export async function obtenerTTS(text: string): Promise<Blob> {
+  const res = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new ApiError(res.status, detail || "Error generando el audio");
+  }
+
+  return await res.blob();
+}

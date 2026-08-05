@@ -1,12 +1,16 @@
-from datetime import datetime
-from models import Evento
+from datetime import datetime, timedelta
+from models import Evento, calcular_prioridad
 from bitrix import (
     crear_evento_bitrix,
     consultar_eventos_bitrix,
     modificar_evento_bitrix,
     eliminar_evento_bitrix,
+    consultar_ocupacion_bitrix,
     BitrixError,
+    _parse_bitrix_date
 )
+from huecos import _calcular_huecos
+
 
 # Buffer unificado de operaciones pendientes de confirmar.
 # Cada entrada: {"tipo": "crear"|"modificar"|"eliminar", "payload": ...}
@@ -28,18 +32,41 @@ async def crear_evento(
     duracion_min: int,
     fecha_inicio: datetime,
     categoria: str,
-    prioridad: str,
     involucrado: str = "",
     descripcion: str = "",
     fecha_limite: datetime | None = None,
     tipo_actividad: str = "",
+    prioridad: str | None = None,
 ) -> dict:
     """Prepara la CREACIÓN de un evento. No lo crea aún en Bitrix.
 
     Se añade al buffer de operaciones pendientes. Puedes llamarla varias
     veces para preparar múltiples eventos. Todos se crearán cuando el
     usuario confirme con confirmar_operaciones_pendientes.
+
+    NOTA sobre prioridad: NO la pases salvo que el usuario la pida
+    explícitamente ("márcala como alta"). Si la omites, se calcula
+    automáticamente a partir de involucrado y fecha_limite según la
+    regla del PRD (ver models.calcular_prioridad).
     """
+    # Coerción de fechas si vienen como string. fecha_limite se usa en
+    # calcular_prioridad antes de que Pydantic haga su conversión.
+    if isinstance(fecha_inicio, str):
+        try:
+            fecha_inicio = datetime.fromisoformat(fecha_inicio)
+        except ValueError:
+            return {"ok": False, "mensaje": f"Fecha de inicio inválida: '{fecha_inicio}'."}
+    if isinstance(fecha_limite, str):
+        try:
+            fecha_limite = datetime.fromisoformat(fecha_limite)
+        except ValueError:
+            return {"ok": False, "mensaje": f"Fecha límite inválida: '{fecha_limite}'."}
+
+    # Si el modelo no pasó prioridad, la calculamos deterministamente.
+    if prioridad is None:
+        prioridad = calcular_prioridad(involucrado, fecha_limite).value
+        print(f"TOOL: crear_evento prioridad calculada → {prioridad}")
+
     try:
         evento = Evento(
             nombre=nombre,
@@ -314,7 +341,7 @@ async def consultar_eventos(
     print(f"TOOL: consultar_eventos ejecutada")
 
     try:
-        eventos = await consultar_eventos_bitrix(fecha_inicio, fecha_fin)
+        eventos = await consultar_ocupacion_bitrix(fecha_inicio, fecha_fin)
     except BitrixError as e:
         return {"ok": False, "mensaje": f"Bitrix rechazó la búsqueda: {e}", "eventos": []}
 
@@ -344,6 +371,108 @@ async def consultar_eventos(
         "eventos": eventos_normalizados,
     }
 
+async def consultar_huecos_libres(
+    fecha_desde: datetime | None = None,
+    fecha_hasta: datetime | None = None,
+    duracion_min: int = 30,
+    incluir_domingo: bool = False,
+    incluir_fuera_horario: bool = False,
+) -> dict:
+    """Busca huecos libres en la agenda del usuario.
+
+    Devuelve intervalos de tiempo (con etiqueta legible) donde el
+    usuario NO tiene eventos y que duran al menos duracion_min.
+    Respeta horario laboral por defecto (L-S 09:00-20:00) y aplica
+    un margen de 5 min entre eventos.
+
+    Args:
+        fecha_desde: rango a inspeccionar. Si None, usa "ahora".
+        fecha_hasta: rango a inspeccionar. Si None, usa "ahora + 48h".
+        duracion_min: duración mínima del hueco (default 30 min).
+        incluir_domingo: True SOLO si el usuario pide domingos
+            explícitamente ("hueco el domingo por la mañana").
+        incluir_fuera_horario: True SOLO si el usuario pide huecos
+            fuera del horario típico ("por la noche", "a las 7 AM",
+            "a las 22:00").
+
+    Úsala cuando:
+    - "¿cuándo puedo agendar X?"
+    - "¿cuándo tengo hueco para Y?"
+    - "propóneme cuándo hacer Z"
+    - Antes de proponer huecos ante urgencia (empresa o alta prioridad).
+    """
+    print("TOOL: consultar_huecos_libres ejecutada")
+
+    from models import TZ_LOCAL  # local para no ensuciar el header
+
+    ahora = datetime.now(TZ_LOCAL)
+
+    # Coerción si vienen como string
+    if isinstance(fecha_desde, str):
+        try:
+            fecha_desde = datetime.fromisoformat(fecha_desde)
+        except ValueError:
+            return {"ok": False, "mensaje": f"fecha_desde inválida: '{fecha_desde}'."}
+    if isinstance(fecha_hasta, str):
+        try:
+            fecha_hasta = datetime.fromisoformat(fecha_hasta)
+        except ValueError:
+            return {"ok": False, "mensaje": f"fecha_hasta inválida: '{fecha_hasta}'."}
+
+    # Defaults
+    if fecha_desde is None:
+        fecha_desde = ahora
+    if fecha_hasta is None:
+        fecha_hasta = fecha_desde + timedelta(days=2)
+
+    # tzinfo
+    if fecha_desde.tzinfo is None:
+        fecha_desde = fecha_desde.replace(tzinfo=TZ_LOCAL)
+    if fecha_hasta.tzinfo is None:
+        fecha_hasta = fecha_hasta.replace(tzinfo=TZ_LOCAL)
+
+    # Consultar Bitrix
+    try:
+        eventos = await consultar_ocupacion_bitrix(fecha_desde, fecha_hasta)
+    except BitrixError as e:
+        return {"ok": False, "mensaje": f"Bitrix rechazó la búsqueda: {e}", "huecos": []}
+
+    huecos = _calcular_huecos(
+        eventos_bitrix=eventos,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        duracion_min=duracion_min,
+        incluir_domingo=incluir_domingo,
+        incluir_fuera_horario=incluir_fuera_horario,
+        ahora=ahora,
+        parse_fecha=_parse_bitrix_date,
+    )
+    # Mensaje explícito para el brain cuando no hay huecos: evita que
+    # reintente en bucle asumiendo que la llamada fallo. Gemini con
+    # instruction following flojo tiende a re-consultar ante resultados
+    # vacios en lugar de comunicarselo al usuario.
+    if not huecos:
+        return {
+            "ok": True,
+            "total": 0,
+            "duracion_solicitada_min": duracion_min,
+            "huecos": [],
+            "mensaje": (
+                f"No hay huecos disponibles de al menos {duracion_min} min "
+                f"en el rango solicitado. El dia podria estar completamente "
+                f"ocupado por eventos, ser fuera de horario laboral, o caer "
+                f"en domingo. Informa al usuario directamente. NO vuelvas a "
+                f"llamar esta tool ni consultar_eventos: dile lo que has "
+                f"encontrado y ofrece alternativas si tiene sentido."
+            ),
+        }
+
+    return {
+        "ok": True,
+        "total": len(huecos),
+        "duracion_solicitada_min": duracion_min,
+        "huecos": huecos,
+    }
 
 async def listar_eventos_preparados() -> dict:
     """Devuelve el BUFFER INTERNO de operaciones preparadas en el turno

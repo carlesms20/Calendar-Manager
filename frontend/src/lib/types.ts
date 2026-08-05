@@ -15,4 +15,5 @@ export interface Evento {
   fecha_inicio: string; // ISO 8601
   fecha_fin: string;
   descripcion: string;
+  prioridad?: "alta" | "media" | "baja" | "";
 }

@@ -102,3 +102,50 @@ class RespuestaAgente(BaseModel):
         if self.tipo_accion != Acciones.CREAR_EVENTO and self.evento is not None:
             raise ValueError("Si NO estás creando evento, NO debe haber evento")
         return self
+
+def calcular_prioridad(
+    involucrado: str,
+    fecha_limite: datetime | None,
+    ahora: datetime | None = None,
+) -> Prioridad:
+    """Calcula la prioridad de un evento según la regla del PRD (Caso 8).
+
+    Regla:
+        - Sin fecha_limite, sin involucrado → baja
+        - Sin fecha_limite, con involucrado → media
+        - fecha_limite a ≤1 día → alta (siempre)
+        - fecha_limite a 2-3 días sin involucrado → media
+        - fecha_limite a 2-3 días con involucrado → alta
+        - fecha_limite a >3 días → base (media si involucrado, baja si no)
+
+    Los días se miden en días de calendario (ceil natural), no como float:
+    "hoy" = 0, "mañana" = 1, "pasado mañana" = 2.
+
+    Args:
+        involucrado: texto libre. Cuenta como "hay involucrado" si no es
+            vacío tras strip.
+        fecha_limite: si es None, no se aplica la parte de urgencia por tiempo.
+        ahora: para tests deterministas. Si es None, usa datetime.now(TZ_LOCAL).
+    """
+    tiene_involucrado = bool(involucrado and involucrado.strip())
+    base = Prioridad.MEDIA if tiene_involucrado else Prioridad.BAJA
+
+    if fecha_limite is None:
+        return base
+
+    if ahora is None:
+        ahora = datetime.now(TZ_LOCAL)
+
+    # Asegurar tzinfo para evitar TypeError al restar naive vs aware
+    if fecha_limite.tzinfo is None:
+        fecha_limite = fecha_limite.replace(tzinfo=TZ_LOCAL)
+    if ahora.tzinfo is None:
+        ahora = ahora.replace(tzinfo=TZ_LOCAL)
+
+    delta_dias = (fecha_limite.date() - ahora.date()).days
+
+    if delta_dias <= 1:
+        return Prioridad.ALTA
+    if delta_dias <= 3:
+        return Prioridad.ALTA if tiene_involucrado else Prioridad.MEDIA
+    return base
