@@ -353,17 +353,22 @@ async def consultar_eventos(
             or q in (e.get("DESCRIPTION") or "").lower()
         ]
 
-    eventos_normalizados = [
-        {
-            "id": e["ID"],
-            "nombre": e["NAME"],
-            "fecha_inicio": e["DATE_FROM"],
-            "fecha_fin": e["DATE_TO"],
+    eventos_normalizados = []
+    for e in eventos:
+        date_from = e.get("DATE_FROM")
+        date_to = e.get("DATE_TO")
+        nombre = e.get("NAME")
+        if not date_from or not date_to or not nombre:
+            print(f"TOOL: consultar_eventos salto evento incompleto (ID={e.get('ID', '?')})")
+            continue
+        eventos_normalizados.append({
+            "id": e.get("ID", ""),
+            "nombre": nombre,
+            "fecha_inicio": date_from,
+            "fecha_fin": date_to,
             "descripcion": e.get("DESCRIPTION", ""),
             "importancia": e.get("IMPORTANCE", ""),
-        }
-        for e in eventos
-    ]
+        })
 
     return {
         "ok": True,
