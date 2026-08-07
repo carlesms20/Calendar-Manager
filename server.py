@@ -15,8 +15,21 @@ import agent
 import voice
 import tools
 import tts
+import usage
 from bitrix import consultar_eventos_bitrix, BitrixError, consultar_ocupacion_bitrix
+import base64
+import secrets
+from os import getenv
+from fastapi import Request
+from fastapi.responses import Response as StarletteResponse
+from dotenv import load_dotenv
+load_dotenv()
 
+APP_USER = getenv("APP_USER", "")
+APP_PASSWORD = getenv("APP_PASSWORD", "")
+
+if not APP_USER or not APP_PASSWORD:
+    print("SERVER WARN: APP_USER/APP_PASSWORD no configurados. /app abierto (dev mode).")
 app = FastAPI(title="Agente SYNCROSFERA")
 
 # CORS: en desarrollo abrimos todo para no pelearse con orígenes locales.
@@ -28,6 +41,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.middleware("http")
+async def basic_auth_para_app(request: Request, call_next):
+    """Basic Auth SOLO para rutas bajo /app (la mini-app React).
+    /api/*, /health y cualquier otra ruta pasan sin auth: el bot Telegram
+    no la necesita y el frontend hace fetch directo a /api desde JS ya
+    autenticado en el navegador.
+
+    En dev mode (APP_USER o APP_PASSWORD vacios) no aplica auth.
+    """
+    path = request.url.path
+    if not path.startswith("/app"):
+        return await call_next(request)
+
+    if not APP_USER or not APP_PASSWORD:
+        return await call_next(request)
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return StarletteResponse(
+            content="Autenticacion requerida",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Syncrosfera"'},
+        )
+
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        user, _, password = decoded.partition(":")
+    except Exception:
+        return StarletteResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Syncrosfera"'},
+        )
+
+    user_ok = secrets.compare_digest(user, APP_USER)
+    pass_ok = secrets.compare_digest(password, APP_PASSWORD)
+    if not (user_ok and pass_ok):
+        return StarletteResponse(
+            content="Credenciales invalidas",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Syncrosfera"'},
+        )
+
+    return await call_next(request)
 
 
 class MensajeTexto(BaseModel):
@@ -229,6 +285,39 @@ def _parsear_fecha_bitrix(s: str) -> datetime:
         return datetime.fromisoformat(s)
     except ValueError:
         return datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
+
+
+@app.get("/api/usage")
+async def obtener_uso(
+    user_id: str | None = Query(None, description="Filtra por usuario. Si se omite, agrega todos."),
+    desde: str | None = Query(None, description="ISO 8601, ej: 2026-08-01T00:00:00"),
+    hasta: str | None = Query(None, description="ISO 8601, ej: 2026-08-31T23:59:59"),
+):
+    """Totales agregados de consumo de tokens y coste USD.
+
+    Sin params, devuelve el total historico agregado de todos los usuarios.
+    Con user_id="alexander" y sin rango, devuelve el total de Alexander.
+    Con rango, filtra por fecha.
+
+    El campo cache_hit_ratio indica cuanto del input viene del cache:
+    >0.5 significa que el prompt caching esta pegando bien en conversaciones
+    de multiples turnos. Si es 0, el cache no esta funcionando.
+    """
+    desde_dt: datetime | None = None
+    hasta_dt: datetime | None = None
+    try:
+        if desde is not None:
+            desde_dt = datetime.fromisoformat(desde)
+        if hasta is not None:
+            hasta_dt = datetime.fromisoformat(hasta)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fechas invalidas, usa ISO 8601")
+
+    try:
+        return await usage.resumen(user_id=user_id, desde=desde_dt, hasta=hasta_dt)
+    except Exception as e:
+        print(f"SERVER: error consultando usage: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error consultando uso")
 
 
 # ---- Servir el frontend compilado ------------------------------------------
