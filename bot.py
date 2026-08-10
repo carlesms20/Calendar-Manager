@@ -50,10 +50,14 @@ def _es_autorizado(message: Message) -> bool:
         )
     return autorizado
 
-
 async def procesar_texto_usuario(texto: str, message: Message):
-    """Delega en agent.procesar_input y responde por Telegram."""
+    """Delega en agent.procesar_input y responde por Telegram.
+    Loggea la respuesta del agente truncada a 200 chars para trazabilidad
+    en Railway sin ensuciar con textos larguisimos.
+    """
     respuesta = await agent.procesar_input("alexander", texto)
+    resp_log = respuesta[:200] + ("..." if len(respuesta) > 200 else "")
+    print(f"BOT: respuesta del agente: '{resp_log}'")
     await message.answer(respuesta)
 
 
@@ -61,6 +65,10 @@ async def text_handler(message: Message):
     if not _es_autorizado(message):
         await message.answer("No autorizado.")
         return
+    print(
+        f"BOT: mensaje texto de {message.from_user.id} "
+        f"(@{message.from_user.username}): '{message.text}'"
+    )
     await procesar_texto_usuario(message.text, message)
 
 
@@ -84,9 +92,18 @@ async def audio_handler(message: Message):
         await message.answer("No he podido entender el audio, prueba de nuevo por favor.")
         return
 
-    # El texto transcrito entra al mismo pipeline que un mensaje escrito
-    await procesar_texto_usuario(texto, message)
+    # Filtro anti-basura: transcripciones vacias, timestamps sueltos
+    # ('00:00'), o cadenas triviales de ruido. Sin esto, un audio mudo
+    # o con solo ruido de fondo entra al pipeline del agente gastando
+    # tokens y produciendo respuestas erraticas.
+    texto_limpio = texto.strip()
+    if len(texto_limpio) < 3 or texto_limpio in {"00:00", "0:00", "...", "…"}:
+        print(f"BOT: audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando")
+        await message.answer("No he entendido el audio, intentalo de nuevo por favor.")
+        return
 
+    # El texto transcrito entra al mismo pipeline que un mensaje escrito
+    await procesar_texto_usuario(texto_limpio, message)
 
 async def file_handler(message: Message):
     if not _es_autorizado(message):

@@ -546,17 +546,29 @@ async def process_message(history: list, resumen: str) -> str:
     ]
 
     for iteracion in range(MAX_ITERACIONES):
-        # Cache breakpoint dinamico: cacheamos el ultimo mensaje del historial
-        # para que en iteraciones subsecuentes las anteriores se lean del cache
-        # en vez de re-procesarse. Ahorro linealmente creciente en turnos con
-        # muchas iteraciones (eliminar N eventos, agendar batch, etc).
+        # Cache breakpoint dinamico. IMPORTANTE: Anthropic limita a 4 bloques
+        # con cache_control por request. Ya gastamos 2 en system+tools, por
+        # tanto solo podemos meter UN cache_control mas en el historial. Si
+        # dejasemos los cache_control de iteraciones anteriores acumulados,
+        # a partir de la 3a iteracion el request pasaria de 4 bloques y
+        # petaria con:
+        #   BadRequestError: 400 - A maximum of 4 blocks with cache_control
+        #   may be provided. Found 5.
+        # Por eso limpiamos primero TODOS los cache_control de mensajes
+        # anteriores, y solo despues ponemos uno nuevo en el ultimo bloque
+        # del ultimo mensaje.
         if messages:
+            for msg in messages:
+                if isinstance(msg.get("content"), list):
+                    for bloque in msg["content"]:
+                        if isinstance(bloque, dict) and "cache_control" in bloque:
+                            del bloque["cache_control"]
+
             ultimo = messages[-1]
             if isinstance(ultimo.get("content"), list):
-                # Ultimo bloque de una lista de content (tool_result o similar)
                 if ultimo["content"] and isinstance(ultimo["content"][-1], dict):
                     ultimo["content"][-1]["cache_control"] = {"type": "ephemeral"}
-            # Si content es string simple no lo cacheamos (no vale la pena, es una entrada de user)
+
         response = await _client.messages.create(
             model=MODELO,
             max_tokens=MAX_TOKENS_BRAIN,

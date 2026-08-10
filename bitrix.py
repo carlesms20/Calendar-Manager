@@ -192,12 +192,25 @@ async def consultar_eventos_bitrix(
     return eventos
 
 def _parse_bitrix_date(s: str) -> datetime:
-    """Bitrix devuelve fechas en 'dd.mm.YYYY HH:MM:SS' (formato europeo).
-    A veces también en ISO 8601 según el endpoint. Aceptamos ambos."""
+    """Bitrix devuelve fechas en tres formatos:
+    - ISO 8601 completo ('2026-08-10T09:00:00+02:00')
+    - 'dd.mm.YYYY HH:MM:SS' formato europeo con hora
+    - 'dd.mm.YYYY' formato europeo sin hora (eventos all-day)
+
+    Los all-day quedan como datetime a 00:00:00 del dia. El caller es
+    responsable de expandir DATE_TO a 23:59:59 si necesita representar
+    "todo el dia". El filtrado por .date() en consultar_eventos_bitrix
+    y la heuristica _es_evento_todo_el_dia() en huecos.py ya lo manejan.
+    """
     try:
         return datetime.fromisoformat(s)
     except ValueError:
+        pass
+    try:
         return datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        pass
+    return datetime.strptime(s, "%d.%m.%Y")
 
 async def consultar_ocupacion_bitrix(
     fecha_inicio: datetime | str | None = None,

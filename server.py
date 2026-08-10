@@ -217,6 +217,24 @@ async def sintetizar_voz(payload: MensajeTTS):
 
     return Response(content=wav_bytes, media_type="audio/wav")
 
+def _parsear_fecha_bitrix(s: str) -> datetime:
+    """Bitrix devuelve fechas en tres formatos:
+    - ISO 8601 completo
+    - 'dd.mm.YYYY HH:MM:SS' formato europeo con hora
+    - 'dd.mm.YYYY' formato europeo sin hora (eventos all-day)
+    Los all-day quedan como datetime a 00:00:00 del dia.
+    """
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        pass
+    return datetime.strptime(s, "%d.%m.%Y")
+
+
 @app.get("/api/eventos", response_model=ListaEventos)
 async def listar_eventos(
     desde: str | None = Query(None, description="ISO 8601, ej: 2026-08-03T00:00:00"),
@@ -246,7 +264,6 @@ async def listar_eventos(
         raise HTTPException(status_code=502, detail=f"Bitrix rechazo la peticion: {e}")
 
     # Normalizamos al formato que consume el frontend
-    # Mapeo inverso de bitrix._MAPEO_IMPORTANCIA
     _IMPORTANCE_A_PRIORIDAD = {"high": "alta", "normal": "media", "low": "baja"}
 
     eventos = []
@@ -263,6 +280,13 @@ async def listar_eventos(
             print(f"SERVER: fecha invalida en evento {e.get('ID', '?')}: {err}")
             continue
 
+        # Eventos all-day: Bitrix suele darlos como DATE_FROM == DATE_TO
+        # (misma fecha, ambos parseados a 00:00:00). Sin esta correccion
+        # el frontend pintaria un tick de duracion cero y el evento no
+        # se veria. Estiramos DATE_TO a las 23:59:59 del mismo dia.
+        if fi == ff and fi.hour == 0 and fi.minute == 0 and fi.second == 0:
+            ff = fi.replace(hour=23, minute=59, second=59)
+
         prioridad = _IMPORTANCE_A_PRIORIDAD.get(
             (e.get("IMPORTANCE") or "").lower(), ""
         )
@@ -277,14 +301,6 @@ async def listar_eventos(
         ))
 
     return ListaEventos(eventos=eventos)
-
-
-def _parsear_fecha_bitrix(s: str) -> datetime:
-    """Bitrix devuelve fechas en 'dd.mm.YYYY HH:MM:SS' o ISO. Aceptamos ambos."""
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
 
 
 @app.get("/api/usage")
