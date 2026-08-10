@@ -1,3 +1,17 @@
+"""Tools que el brain del agente invoca via Anthropic tool_use. Cada tool
+opera sobre un contexto de usuario (user_id) que se pasa como primer
+argumento y que agent._ejecutar_tool inyecta en runtime (el modelo LLM
+no ve este parametro en el schema).
+
+Buffer de operaciones pendientes: dict indexado por user_id. Dos usuarios
+usando el bot en paralelo tienen buffers aislados; el "si, confirma" de
+Alexander solo ejecuta las operaciones que EL preparo, no las que Carles
+tenga preparadas.
+
+Lookup del contexto Bitrix: cada tool que necesita hablar con Bitrix
+resuelve (webhook, bitrix_user_id) via _contexto_bitrix(user_id), que
+consulta config_usuarios.USUARIOS_POR_USERNAME.
+"""
 from datetime import datetime, timedelta
 from models import Evento, calcular_prioridad
 from bitrix import (
@@ -7,27 +21,62 @@ from bitrix import (
     eliminar_evento_bitrix,
     consultar_ocupacion_bitrix,
     BitrixError,
-    _parse_bitrix_date
+    _parse_bitrix_date,
 )
 from huecos import _calcular_huecos
+from config_usuarios import USUARIOS_POR_USERNAME
 
 
-# Buffer unificado de operaciones pendientes de confirmar.
-# Cada entrada: {"tipo": "crear"|"modificar"|"eliminar", "payload": ...}
-_OPERACIONES_PENDIENTES: list[dict] = []
+# Buffer unificado de operaciones pendientes de confirmar, POR USUARIO.
+# Cada entrada de la lista: {"tipo": "crear"|"modificar"|"eliminar", "payload": ...}
+# Cada usuario tiene su propia lista aislada, indexada por user_id ("carles"|"alexander").
+_OPERACIONES_PENDIENTES: dict[str, list[dict]] = {}
 
+
+# --- Helpers privados ---
+
+def _buffer(user_id: str) -> list[dict]:
+    """Devuelve la lista de operaciones pendientes del usuario, creandola
+    vacia si es la primera vez. Todas las tools que tocan el buffer
+    pasan por aqui para evitar duplicar setdefault y hacer explicito el
+    aislamiento por usuario."""
+    return _OPERACIONES_PENDIENTES.setdefault(user_id, [])
+
+
+def _contexto_bitrix(user_id: str) -> tuple[str, int]:
+    """Extrae (webhook, bitrix_user_id) del contexto de usuario para
+    propagarlo a las llamadas a bitrix.py. Si el usuario no existe en
+    config o no tiene webhook, lanza ValueError. El caller es
+    responsable de convertirlo en un dict de error para el brain."""
+    usuario = USUARIOS_POR_USERNAME.get(user_id)
+    if usuario is None:
+        raise ValueError(f"Usuario desconocido: '{user_id}'.")
+    webhook = usuario.get("webhook_bitrix", "")
+    bitrix_uid = usuario.get("bitrix_user_id", 0)
+    if not webhook or not bitrix_uid:
+        raise ValueError(f"Usuario '{user_id}' sin contexto Bitrix configurado.")
+    return webhook, bitrix_uid
+
+
+# --- Tool terminal ---
 
 def responder_texto(mensaje: str) -> str:
     """Termina el turno respondiendo al usuario con un mensaje.
 
-    Úsala para respuestas informativas, resúmenes, confirmaciones,
-    o cuando no haga falta acción posterior del usuario.
+    Usala para respuestas informativas, resumenes, confirmaciones,
+    o cuando no haga falta accion posterior del usuario.
+
+    NOTA: esta tool no necesita user_id porque no toca ni buffer ni
+    Bitrix; solo devuelve el mensaje que el bot mandara al usuario.
     """
-    print(f"TOOL: responder_texto ejecutada")
+    print("TOOL: responder_texto ejecutada")
     return mensaje
 
 
+# --- Tools de preparacion (buffer) ---
+
 async def crear_evento(
+    user_id: str,
     nombre: str,
     duracion_min: int,
     fecha_inicio: datetime,
@@ -38,34 +87,34 @@ async def crear_evento(
     tipo_actividad: str = "",
     prioridad: str | None = None,
 ) -> dict:
-    """Prepara la CREACIÓN de un evento. No lo crea aún en Bitrix.
+    """Prepara la CREACION de un evento. No lo crea aun en Bitrix.
 
-    Se añade al buffer de operaciones pendientes. Puedes llamarla varias
-    veces para preparar múltiples eventos. Todos se crearán cuando el
-    usuario confirme con confirmar_operaciones_pendientes.
+    Se anade al buffer de operaciones pendientes del usuario. Puedes
+    llamarla varias veces para preparar multiples eventos. Todos se
+    crearan cuando el usuario confirme con confirmar_operaciones_pendientes.
 
     NOTA sobre prioridad: NO la pases salvo que el usuario la pida
-    explícitamente ("márcala como alta"). Si la omites, se calcula
-    automáticamente a partir de involucrado y fecha_limite según la
+    explicitamente ("marcala como alta"). Si la omites, se calcula
+    automaticamente a partir de involucrado y fecha_limite segun la
     regla del PRD (ver models.calcular_prioridad).
     """
-    # Coerción de fechas si vienen como string. fecha_limite se usa en
-    # calcular_prioridad antes de que Pydantic haga su conversión.
+    # Coercion de fechas si vienen como string. fecha_limite se usa en
+    # calcular_prioridad antes de que Pydantic haga su conversion.
     if isinstance(fecha_inicio, str):
         try:
             fecha_inicio = datetime.fromisoformat(fecha_inicio)
         except ValueError:
-            return {"ok": False, "mensaje": f"Fecha de inicio inválida: '{fecha_inicio}'."}
+            return {"ok": False, "mensaje": f"Fecha de inicio invalida: '{fecha_inicio}'."}
     if isinstance(fecha_limite, str):
         try:
             fecha_limite = datetime.fromisoformat(fecha_limite)
         except ValueError:
-            return {"ok": False, "mensaje": f"Fecha límite inválida: '{fecha_limite}'."}
+            return {"ok": False, "mensaje": f"Fecha limite invalida: '{fecha_limite}'."}
 
-    # Si el modelo no pasó prioridad, la calculamos deterministamente.
+    # Si el modelo no paso prioridad, la calculamos deterministamente.
     if prioridad is None:
         prioridad = calcular_prioridad(involucrado, fecha_limite).value
-        print(f"TOOL: crear_evento prioridad calculada → {prioridad}")
+        print(f"TOOL[{user_id}]: crear_evento prioridad calculada -> {prioridad}")
 
     try:
         evento = Evento(
@@ -80,38 +129,41 @@ async def crear_evento(
             tipo_actividad=tipo_actividad,
         )
     except Exception as e:
-        print(f"TOOL: crear_evento validacion fallida: {type(e).__name__}: {e}")
+        print(f"TOOL[{user_id}]: crear_evento validacion fallida: {type(e).__name__}: {e}")
         return {
             "ok": False,
             "mensaje": f"No he podido preparar el evento: {e}. Corrige los datos y vuelve a intentarlo.",
         }
 
-    # Dedup: misma creación (nombre + fecha_inicio) ya en buffer → ignorar
-    for op in _OPERACIONES_PENDIENTES:
+    buffer = _buffer(user_id)
+
+    # Dedup: misma creacion (nombre + fecha_inicio) ya en buffer -> ignorar
+    for op in buffer:
         if op["tipo"] == "crear":
             existente: Evento = op["payload"]
             if existente.nombre == evento.nombre and existente.fecha_inicio == evento.fecha_inicio:
-                print(f"TOOL: crear_evento duplicado ignorado ({evento.nombre})")
+                print(f"TOOL[{user_id}]: crear_evento duplicado ignorado ({evento.nombre})")
                 return {
                     "ok": True,
                     "duplicado_ignorado": True,
-                    "mensaje": f"Ya estaba en la lista. Total pendientes: {len(_OPERACIONES_PENDIENTES)}.",
-                    "operaciones_pendientes_total": len(_OPERACIONES_PENDIENTES),
+                    "mensaje": f"Ya estaba en la lista. Total pendientes: {len(buffer)}.",
+                    "operaciones_pendientes_total": len(buffer),
                 }
 
-    _OPERACIONES_PENDIENTES.append({"tipo": "crear", "payload": evento})
-    print(f"TOOL: crear_evento añadido ({len(_OPERACIONES_PENDIENTES)} pendientes): {evento.model_dump()}")
+    buffer.append({"tipo": "crear", "payload": evento})
+    print(f"TOOL[{user_id}]: crear_evento anadido ({len(buffer)} pendientes): {evento.model_dump()}")
 
     return {
         "ok": True,
         "pendiente_confirmacion": True,
-        "mensaje": f"Evento preparado. Total pendientes: {len(_OPERACIONES_PENDIENTES)}.",
-        "operaciones_pendientes_total": len(_OPERACIONES_PENDIENTES),
+        "mensaje": f"Evento preparado. Total pendientes: {len(buffer)}.",
+        "operaciones_pendientes_total": len(buffer),
         "evento": evento.model_dump(mode="json"),
     }
 
 
 async def modificar_evento(
+    user_id: str,
     id: int,
     nombre: str | None = None,
     fecha_inicio: datetime | None = None,
@@ -119,23 +171,28 @@ async def modificar_evento(
     descripcion: str | None = None,
     prioridad: str | None = None,
 ) -> dict:
-    """Prepara la MODIFICACIÓN de un evento existente. No lo modifica aún.
+    """Prepara la MODIFICACION de un evento existente. No lo modifica aun.
 
     Antes de llamarla, DEBES usar consultar_eventos para localizar el
     evento y obtener su id. La tool valida que el id existe en Bitrix.
-    Se aplicará cuando el usuario confirme con
+    Se aplicara cuando el usuario confirme con
     confirmar_operaciones_pendientes.
 
     Args:
         id: identificador Bitrix del evento (obligatorio).
-        nombre: nuevo título, si se cambia.
+        nombre: nuevo titulo, si se cambia.
         fecha_inicio: nueva fecha/hora de inicio, si se cambia.
-        duracion_min: nueva duración, si se cambia.
-        descripcion: nueva descripción, si se cambia.
+        duracion_min: nueva duracion, si se cambia.
+        descripcion: nueva descripcion, si se cambia.
         prioridad: "alta", "media" o "baja", si se cambia.
     """
     try:
-        eventos = await consultar_eventos_bitrix()
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    try:
+        eventos = await consultar_eventos_bitrix(webhook, bitrix_uid)
     except BitrixError as e:
         return {"ok": False, "mensaje": f"No pude verificar el evento en Bitrix: {e}"}
 
@@ -146,13 +203,13 @@ async def modificar_evento(
             "mensaje": f"No existe un evento con id {id}. Usa consultar_eventos para verificar.",
         }
 
-    # Gemini nos manda datetimes serializados como string. Coercemos aquí
-    # para que en el buffer siempre haya datetime, no str.
+    # Coercion de string a datetime para que en el buffer siempre haya
+    # datetime, no str.
     if isinstance(fecha_inicio, str):
         try:
             fecha_inicio = datetime.fromisoformat(fecha_inicio)
         except ValueError:
-            return {"ok": False, "mensaje": f"Fecha inválida: '{fecha_inicio}'."}
+            return {"ok": False, "mensaje": f"Fecha invalida: '{fecha_inicio}'."}
 
     cambios = {}
     if nombre is not None: cambios["nombre"] = nombre
@@ -162,48 +219,55 @@ async def modificar_evento(
     if prioridad is not None: cambios["prioridad"] = prioridad
 
     if not cambios:
-        return {"ok": False, "mensaje": "No has indicado ningún campo a modificar."}
+        return {"ok": False, "mensaje": "No has indicado ningun campo a modificar."}
 
-    # Dedup: si ya había una modificación pendiente al mismo id, la reemplaza.
-    for i, op in enumerate(_OPERACIONES_PENDIENTES):
+    buffer = _buffer(user_id)
+
+    # Dedup: si ya habia una modificacion pendiente al mismo id, la reemplaza.
+    for i, op in enumerate(buffer):
         if op["tipo"] == "modificar" and op["payload"]["id"] == id:
-            _OPERACIONES_PENDIENTES[i] = {
+            buffer[i] = {
                 "tipo": "modificar",
                 "payload": {"id": id, "evento_actual": evento_actual, "cambios": cambios},
             }
-            print(f"TOOL: modificar_evento reemplazado (id={id})")
+            print(f"TOOL[{user_id}]: modificar_evento reemplazado (id={id})")
             return {
                 "ok": True,
                 "reemplazado": True,
-                "mensaje": f"Modificación actualizada. Total pendientes: {len(_OPERACIONES_PENDIENTES)}.",
-                "operaciones_pendientes_total": len(_OPERACIONES_PENDIENTES),
+                "mensaje": f"Modificacion actualizada. Total pendientes: {len(buffer)}.",
+                "operaciones_pendientes_total": len(buffer),
             }
 
-    _OPERACIONES_PENDIENTES.append({
+    buffer.append({
         "tipo": "modificar",
         "payload": {"id": id, "evento_actual": evento_actual, "cambios": cambios},
     })
-    print(f"TOOL: modificar_evento añadido (id={id}, cambios={list(cambios.keys())})")
+    print(f"TOOL[{user_id}]: modificar_evento anadido (id={id}, cambios={list(cambios.keys())})")
 
     return {
         "ok": True,
         "pendiente_confirmacion": True,
-        "mensaje": f"Modificación preparada. Total pendientes: {len(_OPERACIONES_PENDIENTES)}.",
-        "operaciones_pendientes_total": len(_OPERACIONES_PENDIENTES),
+        "mensaje": f"Modificacion preparada. Total pendientes: {len(buffer)}.",
+        "operaciones_pendientes_total": len(buffer),
         "nombre_actual": evento_actual.get("NAME"),
         "cambios": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in cambios.items()},
     }
 
 
-async def eliminar_evento(id: int) -> dict:
-    """Prepara la ELIMINACIÓN de un evento existente. No lo elimina aún.
+async def eliminar_evento(user_id: str, id: int) -> dict:
+    """Prepara la ELIMINACION de un evento existente. No lo elimina aun.
 
     Antes de llamarla, DEBES usar consultar_eventos para localizar el
-    evento y obtener su id. Se aplicará cuando el usuario confirme con
+    evento y obtener su id. Se aplicara cuando el usuario confirme con
     confirmar_operaciones_pendientes.
     """
     try:
-        eventos = await consultar_eventos_bitrix()
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    try:
+        eventos = await consultar_eventos_bitrix(webhook, bitrix_uid)
     except BitrixError as e:
         return {"ok": False, "mensaje": f"No pude verificar el evento en Bitrix: {e}"}
 
@@ -214,18 +278,20 @@ async def eliminar_evento(id: int) -> dict:
             "mensaje": f"No existe un evento con id {id}. Usa consultar_eventos para verificar.",
         }
 
-    # Dedup: misma eliminación ya en buffer → ignorar
-    for op in _OPERACIONES_PENDIENTES:
+    buffer = _buffer(user_id)
+
+    # Dedup: misma eliminacion ya en buffer -> ignorar
+    for op in buffer:
         if op["tipo"] == "eliminar" and op["payload"]["id"] == id:
-            print(f"TOOL: eliminar_evento duplicado ignorado (id={id})")
+            print(f"TOOL[{user_id}]: eliminar_evento duplicado ignorado (id={id})")
             return {
                 "ok": True,
                 "duplicado_ignorado": True,
-                "mensaje": f"Ya estaba en la lista. Total pendientes: {len(_OPERACIONES_PENDIENTES)}.",
-                "operaciones_pendientes_total": len(_OPERACIONES_PENDIENTES),
+                "mensaje": f"Ya estaba en la lista. Total pendientes: {len(buffer)}.",
+                "operaciones_pendientes_total": len(buffer),
             }
 
-    _OPERACIONES_PENDIENTES.append({
+    buffer.append({
         "tipo": "eliminar",
         "payload": {
             "id": id,
@@ -233,32 +299,42 @@ async def eliminar_evento(id: int) -> dict:
             "fecha_inicio": evento_actual.get("DATE_FROM"),
         },
     })
-    print(f"TOOL: eliminar_evento añadido (id={id}, nombre={evento_actual.get('NAME')})")
+    print(f"TOOL[{user_id}]: eliminar_evento anadido (id={id}, nombre={evento_actual.get('NAME')})")
 
     return {
         "ok": True,
         "pendiente_confirmacion": True,
-        "mensaje": f"Eliminación preparada. Total pendientes: {len(_OPERACIONES_PENDIENTES)}.",
-        "operaciones_pendientes_total": len(_OPERACIONES_PENDIENTES),
+        "mensaje": f"Eliminacion preparada. Total pendientes: {len(buffer)}.",
+        "operaciones_pendientes_total": len(buffer),
         "nombre": evento_actual.get("NAME"),
         "fecha_inicio": evento_actual.get("DATE_FROM"),
     }
 
 
-async def confirmar_operaciones_pendientes() -> dict:
-    """Ejecuta en Bitrix TODAS las operaciones pendientes (crear, modificar, eliminar).
+# --- Tools de confirmacion ---
 
-    Se ejecutan en el orden en que se prepararon. Después, la lista queda
-    vacía. Úsala SOLO cuando el usuario haya confirmado explícitamente
-    ("sí", "vale", "confirma", "adelante").
+async def confirmar_operaciones_pendientes(user_id: str) -> dict:
+    """Ejecuta en Bitrix TODAS las operaciones pendientes DEL USUARIO
+    (crear, modificar, eliminar).
+
+    Se ejecutan en el orden en que se prepararon. Despues, la lista
+    de ESTE usuario queda vacia (las de otros usuarios no se tocan).
+    Usala SOLO cuando el usuario haya confirmado explicitamente ("si",
+    "vale", "confirma", "adelante").
     """
-    global _OPERACIONES_PENDIENTES
+    try:
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
 
-    if not _OPERACIONES_PENDIENTES:
+    buffer = _buffer(user_id)
+
+    if not buffer:
         return {"ok": False, "mensaje": "No hay operaciones pendientes de confirmar."}
 
-    pendientes = _OPERACIONES_PENDIENTES.copy()
-    _OPERACIONES_PENDIENTES = []
+    pendientes = buffer.copy()
+    # Vaciar SOLO el buffer del usuario que confirma (no un global .clear()).
+    _OPERACIONES_PENDIENTES[user_id] = []
 
     creados, modificados, eliminados, fallidos = [], [], [], []
 
@@ -266,26 +342,27 @@ async def confirmar_operaciones_pendientes() -> dict:
         tipo, payload = op["tipo"], op["payload"]
         try:
             if tipo == "crear":
-                event_id = await crear_evento_bitrix(payload)
+                event_id = await crear_evento_bitrix(webhook, bitrix_uid, payload)
                 creados.append({"bitrix_id": event_id, "nombre": payload.nombre})
             elif tipo == "modificar":
                 await modificar_evento_bitrix(
-                    payload["id"], payload["evento_actual"], payload["cambios"]
+                    webhook, bitrix_uid,
+                    payload["id"], payload["evento_actual"], payload["cambios"],
                 )
                 modificados.append({
                     "bitrix_id": payload["id"],
                     "cambios": list(payload["cambios"].keys()),
                 })
             elif tipo == "eliminar":
-                await eliminar_evento_bitrix(payload["id"])
+                await eliminar_evento_bitrix(webhook, bitrix_uid, payload["id"])
                 eliminados.append({"bitrix_id": payload["id"], "nombre": payload["nombre"]})
         except Exception as e:
             fallidos.append({"tipo": tipo, "error": f"{type(e).__name__}: {e}"})
 
     print(
-    f"TOOL: confirmar_operaciones_pendientes: "
-    f"{len(creados)} creados, {len(modificados)} modificados, "
-    f"{len(eliminados)} eliminados, {len(fallidos)} fallidos"
+        f"TOOL[{user_id}]: confirmar_operaciones_pendientes: "
+        f"{len(creados)} creados, {len(modificados)} modificados, "
+        f"{len(eliminados)} eliminados, {len(fallidos)} fallidos"
     )
     for f in fallidos:
         print(f"  FALLIDO ({f['tipo']}): {f['error']}")
@@ -303,24 +380,28 @@ async def confirmar_operaciones_pendientes() -> dict:
     }
 
 
-async def cancelar_operaciones_pendientes() -> dict:
-    """Descarta TODAS las operaciones pendientes (crear, modificar, eliminar).
+async def cancelar_operaciones_pendientes(user_id: str) -> dict:
+    """Descarta TODAS las operaciones pendientes DEL USUARIO.
 
-    Úsala cuando el usuario diga "cancela todo", "olvídalo", "empecemos
+    Usala cuando el usuario diga "cancela todo", "olvidalo", "empecemos
     de nuevo", o cuando pida cambios que requieran rehacer la lista.
+    Solo afecta al buffer del usuario que llama, nunca al de otros.
     """
-    global _OPERACIONES_PENDIENTES
-    n = len(_OPERACIONES_PENDIENTES)
-    _OPERACIONES_PENDIENTES = []
-    print(f"TOOL: cancelar_operaciones_pendientes ejecutada ({n} descartadas)")
+    buffer = _buffer(user_id)
+    n = len(buffer)
+    _OPERACIONES_PENDIENTES[user_id] = []
+    print(f"TOOL[{user_id}]: cancelar_operaciones_pendientes ejecutada ({n} descartadas)")
     return {
         "ok": True,
         "canceladas": n,
-        "mensaje": f"{n} operación(es) pendiente(s) descartada(s).",
+        "mensaje": f"{n} operacion(es) pendiente(s) descartada(s).",
     }
 
 
+# --- Tools de consulta ---
+
 async def consultar_eventos(
+    user_id: str,
     fecha_inicio: datetime | None = None,
     fecha_fin: datetime | None = None,
     categoria: str | None = None,
@@ -328,22 +409,27 @@ async def consultar_eventos(
 ) -> dict:
     """Consulta los eventos del calendario del usuario.
 
-    Úsala cuando el usuario pregunte por su agenda o quiera saber qué
-    tiene agendado. Ejemplos: "¿qué tengo mañana?", "¿estoy libre el
-    viernes?", "¿cuándo tengo la cita con Juan?".
+    Usala cuando el usuario pregunte por su agenda o quiera saber que
+    tiene agendado. Ejemplos: "que tengo manana?", "estoy libre el
+    viernes?", "cuando tengo la cita con Juan?".
 
     Args:
         fecha_inicio: eventos que empiecen desde esta fecha en adelante.
         fecha_fin: eventos que empiecen antes de esta fecha.
         categoria: "personal" o "empresa" (solo si el usuario lo pide).
-        texto_libre: busca en nombre y descripción.
+        texto_libre: busca en nombre y descripcion.
     """
-    print(f"TOOL: consultar_eventos ejecutada")
+    print(f"TOOL[{user_id}]: consultar_eventos ejecutada")
 
     try:
-        eventos = await consultar_ocupacion_bitrix(fecha_inicio, fecha_fin)
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e), "eventos": []}
+
+    try:
+        eventos = await consultar_ocupacion_bitrix(webhook, bitrix_uid, fecha_inicio, fecha_fin)
     except BitrixError as e:
-        return {"ok": False, "mensaje": f"Bitrix rechazó la búsqueda: {e}", "eventos": []}
+        return {"ok": False, "mensaje": f"Bitrix rechazo la busqueda: {e}", "eventos": []}
 
     if texto_libre:
         q = texto_libre.lower()
@@ -359,7 +445,7 @@ async def consultar_eventos(
         date_to = e.get("DATE_TO")
         nombre = e.get("NAME")
         if not date_from or not date_to or not nombre:
-            print(f"TOOL: consultar_eventos salto evento incompleto (ID={e.get('ID', '?')})")
+            print(f"TOOL[{user_id}]: consultar_eventos salto evento incompleto (ID={e.get('ID', '?')})")
             continue
         eventos_normalizados.append({
             "id": e.get("ID", ""),
@@ -376,7 +462,9 @@ async def consultar_eventos(
         "eventos": eventos_normalizados,
     }
 
+
 async def consultar_huecos_libres(
+    user_id: str,
     fecha_desde: datetime | None = None,
     fecha_hasta: datetime | None = None,
     duracion_min: int = 30,
@@ -393,36 +481,41 @@ async def consultar_huecos_libres(
     Args:
         fecha_desde: rango a inspeccionar. Si None, usa "ahora".
         fecha_hasta: rango a inspeccionar. Si None, usa "ahora + 48h".
-        duracion_min: duración mínima del hueco (default 30 min).
+        duracion_min: duracion minima del hueco (default 30 min).
         incluir_domingo: True SOLO si el usuario pide domingos
-            explícitamente ("hueco el domingo por la mañana").
+            explicitamente ("hueco el domingo por la manana").
         incluir_fuera_horario: True SOLO si el usuario pide huecos
-            fuera del horario típico ("por la noche", "a las 7 AM",
+            fuera del horario tipico ("por la noche", "a las 7 AM",
             "a las 22:00").
 
-    Úsala cuando:
-    - "¿cuándo puedo agendar X?"
-    - "¿cuándo tengo hueco para Y?"
-    - "propóneme cuándo hacer Z"
+    Usala cuando:
+    - "cuando puedo agendar X?"
+    - "cuando tengo hueco para Y?"
+    - "proponme cuando hacer Z"
     - Antes de proponer huecos ante urgencia (empresa o alta prioridad).
     """
-    print("TOOL: consultar_huecos_libres ejecutada")
+    print(f"TOOL[{user_id}]: consultar_huecos_libres ejecutada")
 
     from models import TZ_LOCAL  # local para no ensuciar el header
 
+    try:
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e), "huecos": []}
+
     ahora = datetime.now(TZ_LOCAL)
 
-    # Coerción si vienen como string
+    # Coercion si vienen como string
     if isinstance(fecha_desde, str):
         try:
             fecha_desde = datetime.fromisoformat(fecha_desde)
         except ValueError:
-            return {"ok": False, "mensaje": f"fecha_desde inválida: '{fecha_desde}'."}
+            return {"ok": False, "mensaje": f"fecha_desde invalida: '{fecha_desde}'."}
     if isinstance(fecha_hasta, str):
         try:
             fecha_hasta = datetime.fromisoformat(fecha_hasta)
         except ValueError:
-            return {"ok": False, "mensaje": f"fecha_hasta inválida: '{fecha_hasta}'."}
+            return {"ok": False, "mensaje": f"fecha_hasta invalida: '{fecha_hasta}'."}
 
     # Defaults
     if fecha_desde is None:
@@ -438,9 +531,9 @@ async def consultar_huecos_libres(
 
     # Consultar Bitrix
     try:
-        eventos = await consultar_ocupacion_bitrix(fecha_desde, fecha_hasta)
+        eventos = await consultar_ocupacion_bitrix(webhook, bitrix_uid, fecha_desde, fecha_hasta)
     except BitrixError as e:
-        return {"ok": False, "mensaje": f"Bitrix rechazó la búsqueda: {e}", "huecos": []}
+        return {"ok": False, "mensaje": f"Bitrix rechazo la busqueda: {e}", "huecos": []}
 
     huecos = _calcular_huecos(
         eventos_bitrix=eventos,
@@ -452,10 +545,8 @@ async def consultar_huecos_libres(
         ahora=ahora,
         parse_fecha=_parse_bitrix_date,
     )
-    # Mensaje explícito para el brain cuando no hay huecos: evita que
-    # reintente en bucle asumiendo que la llamada fallo. Gemini con
-    # instruction following flojo tiende a re-consultar ante resultados
-    # vacios en lugar de comunicarselo al usuario.
+    # Mensaje explicito para el brain cuando no hay huecos: evita que
+    # reintente en bucle asumiendo que la llamada fallo.
     if not huecos:
         return {
             "ok": True,
@@ -479,24 +570,27 @@ async def consultar_huecos_libres(
         "huecos": huecos,
     }
 
-async def listar_eventos_preparados() -> dict:
-    """Devuelve el BUFFER INTERNO de operaciones preparadas en el turno
-    actual, que aún no se han ejecutado en Bitrix y esperan confirmación.
+
+async def listar_eventos_preparados(user_id: str) -> dict:
+    """Devuelve el BUFFER INTERNO de operaciones preparadas por el
+    usuario en el turno actual, que aun no se han ejecutado en Bitrix
+    y esperan confirmacion.
 
     NO consulta el calendario real. Para preguntas sobre la agenda del
     usuario, usa consultar_eventos.
 
-    Cuándo usar esta tool:
+    Cuando usar esta tool:
     - Antes de responder al usuario con un resumen o listado de lo que
       acabas de preparar, para no listar de memoria.
-    - Si el usuario pregunta "¿qué tienes preparado?", "¿qué ibas a
-      confirmar?", "recuérdame lo que estabas por hacer".
-    - Antes de añadir más operaciones, para saber qué hay ya.
+    - Si el usuario pregunta "que tienes preparado?", "que ibas a
+      confirmar?", "recuerdame lo que estabas por hacer".
+    - Antes de anadir mas operaciones, para saber que hay ya.
     """
-    print(f"TOOL: listar_eventos_preparados ejecutada ({len(_OPERACIONES_PENDIENTES)} en buffer)")
+    buffer = _buffer(user_id)
+    print(f"TOOL[{user_id}]: listar_eventos_preparados ejecutada ({len(buffer)} en buffer)")
 
     operaciones = []
-    for op in _OPERACIONES_PENDIENTES:
+    for op in buffer:
         if op["tipo"] == "crear":
             operaciones.append({
                 "tipo": "crear",

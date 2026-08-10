@@ -1,29 +1,69 @@
-import httpx
-from os import getenv
-from dotenv import load_dotenv
-from datetime import timedelta
-from models import Evento, Prioridad
-from datetime import datetime, timedelta
-import asyncio
+"""Cliente de Bitrix24 REST. Todas las funciones son async y reciben
+el contexto del usuario (webhook + bitrix_user_id) como argumentos
+explicitos. No hay estado global de usuario: cada llamada declara
+contra que Bitrix opera.
 
-load_dotenv()
-WEBHOOK = getenv("WEBHOOK_BITRIX")
-USER_ID = int(getenv("BITRIX_USER_ID", "0"))
-_SECCIONES_CACHE: list[int] | None = None
+Motivo del diseno: en produccion tenemos dos usuarios (Carles y
+Alexander) con calendarios en tenants Bitrix distintos. Antes teniamos
+constantes globales USER_ID y WEBHOOK leidas del .env al importar el
+modulo, lo que hacia imposible atender a dos usuarios en el mismo
+proceso.
+
+Ahora cada tool que llama a Bitrix propaga (webhook, bitrix_user_id)
+desde el contexto de usuario resuelto en la capa de entrada (bot.py
+para Telegram, server.py para web).
+"""
+import httpx
+import asyncio
+from datetime import datetime, timedelta
+
+from models import Evento, Prioridad
+
 
 class BitrixError(Exception):
     """Errores de negocio o red de Bitrix."""
     pass
 
-async def solicitud(metodo: str, params: dict | None = None, es_v3: bool = False):
+
+# Mapeo de nuestra prioridad -> valor que espera Bitrix.
+_MAPEO_IMPORTANCIA = {
+    Prioridad.ALTA: "high",
+    Prioridad.MEDIA: "normal",
+    Prioridad.BAJA: "low",
+}
+
+
+# --- Cache de secciones por usuario ---
+# Bitrix devuelve las secciones (calendarios) disponibles al llamar a
+# calendar.section.get. Es una lista de IDs que se pasa como parametro
+# 'section' en calendar.event.get para filtrar (sin ella, algunos tipos
+# de eventos como los dias libres con DATE_FROM == DATE_TO no aparecen).
+# No cambia en runtime, asi que la cacheamos por bitrix_user_id tras la
+# primera llamada. Dos usuarios = dos entradas en el dict.
+_SECCIONES_CACHE: dict[int, list[int]] = {}
+
+
+async def solicitud(webhook: str, metodo: str, params: dict | None = None, es_v3: bool = False):
     """POST paginado al webhook de Bitrix.
 
-    - Si el 'result' es lista, itera con start/next hasta agotar páginas.
+    - Si el 'result' es lista, itera con start/next hasta agotar paginas.
     - Si el 'result' es dict/scalar, lo devuelve tal cual.
 
     Lanza BitrixError en cualquier fallo (red, HTTP, JSON, error de negocio).
+
+    Args:
+        webhook: URL del webhook con user_id embebido, tal cual la da
+            Bitrix (ej: https://xxx.bitrix24.es/rest/17/abc123/). Sin
+            barra final se acepta igual (concatena bien con el metodo).
+        metodo: nombre del metodo REST (ej: 'calendar.event.get').
+        params: parametros del body. None equivale a dict vacio.
+        es_v3: bandera para el endpoint REST v3 (no usada hoy, se
+            mantiene por compat).
     """
-    base = WEBHOOK.replace("/rest/", "/rest/api/") if es_v3 else WEBHOOK
+    if not webhook:
+        raise BitrixError("Webhook Bitrix vacio. Usuario mal configurado.")
+
+    base = webhook.replace("/rest/", "/rest/api/") if es_v3 else webhook
     if params is None:
         params = {}
 
@@ -44,10 +84,10 @@ async def solicitud(metodo: str, params: dict | None = None, es_v3: bool = False
             try:
                 result = query.json()
             except ValueError:
-                raise BitrixError(f"Respuesta no válida en {metodo}: {query.text}")
+                raise BitrixError(f"Respuesta no valida en {metodo}: {query.text}")
 
             if "error" in result:
-                raise BitrixError(f"Bitrix rechazó {metodo}, args={params}, error={result['error']}")
+                raise BitrixError(f"Bitrix rechazo {metodo}, args={params}, error={result['error']}")
 
             pagina = result["result"]
             if not isinstance(pagina, list):
@@ -60,24 +100,23 @@ async def solicitud(metodo: str, params: dict | None = None, es_v3: bool = False
 
     return resultado
 
-# Mapeo de nuestra prioridad → valor que espera Bitrix.
-_MAPEO_IMPORTANCIA = {
-    Prioridad.ALTA: "high",
-    Prioridad.MEDIA: "normal",
-    Prioridad.BAJA: "low",
-}
 
-
-async def crear_evento_bitrix(evento: Evento) -> int:
+async def crear_evento_bitrix(webhook: str, bitrix_user_id: int, evento: Evento) -> int:
     """Crea un evento en el calendario personal del usuario Bitrix.
 
-    Devuelve el ID numérico del evento creado.
+    Devuelve el ID numerico del evento creado.
     Lanza BitrixError si algo falla.
+
+    Args:
+        webhook, bitrix_user_id: contexto del usuario propietario del
+            calendario donde se crea el evento.
+        evento: objeto Evento con toda la informacion (nombre, fechas,
+            duracion, prioridad, involucrado, descripcion...).
     """
     fecha_fin = evento.fecha_inicio + timedelta(minutes=evento.duracion_min)
 
-    # Componemos la descripción incluyendo el involucrado (Bitrix quiere IDs
-    # numéricos en attendees; nosotros manejamos texto libre).
+    # Componemos la descripcion incluyendo el involucrado (Bitrix quiere IDs
+    # numericos en attendees; nosotros manejamos texto libre).
     descripcion = evento.descripcion or ""
     if evento.involucrado:
         prefijo = f"Involucrado: {evento.involucrado}"
@@ -85,7 +124,7 @@ async def crear_evento_bitrix(evento: Evento) -> int:
 
     params = {
         "type": "user",
-        "ownerId": USER_ID,
+        "ownerId": bitrix_user_id,
         "name": evento.nombre,
         "from": evento.fecha_inicio.strftime("%Y-%m-%dT%H:%M:%S"),
         "to": fecha_fin.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -96,49 +135,60 @@ async def crear_evento_bitrix(evento: Evento) -> int:
         "timezone_to": "Europe/Madrid",
     }
 
-    return await solicitud("calendar.event.add", params)
+    return await solicitud(webhook, "calendar.event.add", params)
 
-async def obtener_secciones_user() -> list[int]:
+
+async def obtener_secciones_user(webhook: str, bitrix_user_id: int) -> list[int]:
     """Devuelve las IDs de todas las secciones del calendario del user.
 
-    Se cachea a nivel proceso: la primera llamada consulta a Bitrix,
-    el resto son gratis. Si Alexander conecta un nuevo calendario en
-    Bitrix mientras el bot corre, hay que reiniciar el proceso.
+    Se cachea a nivel proceso por bitrix_user_id: la primera llamada
+    consulta a Bitrix, el resto son gratis. Si el usuario conecta un
+    nuevo calendario en Bitrix mientras el bot corre, hay que reiniciar
+    el proceso.
 
-    Motivo: calendar.event.get sin parámetro 'section' NO devuelve
-    algunos tipos de eventos (comprobado: días libres con DATE_FROM
+    Motivo: calendar.event.get sin parametro 'section' NO devuelve
+    algunos tipos de eventos (comprobado: dias libres con DATE_FROM
     == DATE_TO). Pasando la lista completa se soluciona.
+
+    Si Bitrix falla al listar secciones, se hace fallback a lista vacia
+    (comportamiento degradado, pero el bot sigue funcionando).
     """
-    global _SECCIONES_CACHE
-    if _SECCIONES_CACHE is not None:
-        return _SECCIONES_CACHE
+    if bitrix_user_id in _SECCIONES_CACHE:
+        return _SECCIONES_CACHE[bitrix_user_id]
     try:
-        secciones = await solicitud("calendar.section.get", {"type": "user", "ownerId": USER_ID})
+        secciones = await solicitud(
+            webhook,
+            "calendar.section.get",
+            {"type": "user", "ownerId": bitrix_user_id},
+        )
     except Exception as e:
-        print(f"BITRIX: no pude listar secciones ({e}), sigo sin filtrar")
+        print(f"BITRIX: no pude listar secciones para user {bitrix_user_id} ({e}), sigo sin filtrar")
         return []
     if not isinstance(secciones, list):
         return []
-    _SECCIONES_CACHE = [int(s["ID"]) for s in secciones if "ID" in s]
-    print(f"BITRIX: secciones cacheadas para user {USER_ID}: {_SECCIONES_CACHE}")
-    return _SECCIONES_CACHE
+    _SECCIONES_CACHE[bitrix_user_id] = [int(s["ID"]) for s in secciones if "ID" in s]
+    print(f"BITRIX: secciones cacheadas para user {bitrix_user_id}: {_SECCIONES_CACHE[bitrix_user_id]}")
+    return _SECCIONES_CACHE[bitrix_user_id]
+
 
 async def consultar_eventos_bitrix(
+    webhook: str,
+    bitrix_user_id: int,
     fecha_inicio: datetime | str | None = None,
     fecha_fin: datetime | str | None = None,
 ) -> list[dict]:
     """Consulta eventos del calendario personal del usuario en Bitrix.
 
     Devuelve la lista tal cual la da la API: dicts con muchos campos y
-    nombres en MAYÚSCULAS. La normalización/filtrado adicional se hace
+    nombres en MAYUSCULAS. La normalizacion/filtrado adicional se hace
     en la capa de tools.
 
     Args:
+        webhook, bitrix_user_id: contexto del usuario.
         fecha_inicio: fecha desde la que buscar. Acepta datetime o string
-            ISO 8601 (Gemini puede pasar cualquiera de los dos). Si es
-            None, Bitrix usa por defecto un mes antes de hoy.
+            ISO 8601. Si es None, Bitrix usa por defecto un mes antes.
         fecha_fin: fecha hasta la que buscar. Mismo criterio. Si es None,
-            Bitrix usa por defecto tres meses después de hoy.
+            Bitrix usa por defecto tres meses despues.
     """
     def _a_datetime(valor):
         if valor is None or isinstance(valor, datetime):
@@ -147,21 +197,19 @@ async def consultar_eventos_bitrix(
             try:
                 return datetime.fromisoformat(valor)
             except ValueError as e:
-                raise BitrixError(f"Fecha inválida '{valor}': {e}") from e
+                raise BitrixError(f"Fecha invalida '{valor}': {e}") from e
         raise BitrixError(f"Tipo de fecha no soportado: {type(valor).__name__}")
 
     fecha_inicio = _a_datetime(fecha_inicio)
     fecha_fin = _a_datetime(fecha_fin)
 
-    secciones = await obtener_secciones_user()
+    secciones = await obtener_secciones_user(webhook, bitrix_user_id)
 
-    secciones = await obtener_secciones_user()
-
-    # Pedimos a Bitrix con 1 día de margen por cada lado y filtramos en
-    # Python. Motivo: Bitrix descarta eventos de duración cero
+    # Pedimos a Bitrix con 1 dia de margen por cada lado y filtramos en
+    # Python. Motivo: Bitrix descarta eventos de duracion cero
     # (DATE_FROM == DATE_TO) cuyos timestamps caen justo en el borde
-    # del rango pedido — usa comparación estricta, no inclusiva.
-    params = {"type": "user", "ownerId": USER_ID}
+    # del rango pedido — usa comparacion estricta, no inclusiva.
+    params = {"type": "user", "ownerId": bitrix_user_id}
     if secciones:
         params["section"] = secciones
     if fecha_inicio is not None:
@@ -169,10 +217,10 @@ async def consultar_eventos_bitrix(
     if fecha_fin is not None:
         params["to"] = (fecha_fin + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    eventos = await solicitud("calendar.event.get", params)
+    eventos = await solicitud(webhook, "calendar.event.get", params)
 
     # Filtrado post-Bitrix por fecha de calendario. Robusto frente a
-    # eventos de duración cero: usamos .date() para que un all-day en el
+    # eventos de duracion cero: usamos .date() para que un all-day en el
     # borde caiga dentro.
     if fecha_inicio is not None or fecha_fin is not None:
         filtrados = []
@@ -190,6 +238,7 @@ async def consultar_eventos_bitrix(
         return filtrados
 
     return eventos
+
 
 def _parse_bitrix_date(s: str) -> datetime:
     """Bitrix devuelve fechas en tres formatos:
@@ -212,24 +261,31 @@ def _parse_bitrix_date(s: str) -> datetime:
         pass
     return datetime.strptime(s, "%d.%m.%Y")
 
+
 async def consultar_ocupacion_bitrix(
+    webhook: str,
+    bitrix_user_id: int,
     fecha_inicio: datetime | str | None = None,
     fecha_fin: datetime | str | None = None,
 ) -> list[dict]:
     """Devuelve TODO lo que hace al usuario busy: eventos + absences.
 
     Combina en paralelo:
-      - calendar.event.get       → eventos con detalle completo (DESCRIPTION,
-                                   IMPORTANCE, ATTENDEES...)
-      - calendar.accessibility.get → todo lo que ocupa al usuario, incluidas
-                                     absences que event.get no ve.
+      - calendar.event.get         -> eventos con detalle completo (DESCRIPTION,
+                                       IMPORTANCE, ATTENDEES...)
+      - calendar.accessibility.get -> todo lo que ocupa al usuario, incluidas
+                                       absences que event.get no ve.
 
     Deduplica por ID. Los que vienen de event.get tienen prioridad porque
-    llevan DESCRIPTION y demás campos ricos; los que solo aparecen en
-    accessibility (típicamente absences) se añaden tal cual.
+    llevan DESCRIPTION y demas campos ricos; los que solo aparecen en
+    accessibility (tipicamente absences) se anaden tal cual.
 
     Si accessibility falla, cae gracefully sobre el resultado de event.get:
     peor caso, comportamiento anterior sin absences.
+
+    Args:
+        webhook, bitrix_user_id: contexto del usuario.
+        fecha_inicio, fecha_fin: rango a inspeccionar.
     """
     def _a_datetime(valor):
         if valor is None or isinstance(valor, datetime):
@@ -238,16 +294,16 @@ async def consultar_ocupacion_bitrix(
             try:
                 return datetime.fromisoformat(valor)
             except ValueError as e:
-                raise BitrixError(f"Fecha inválida '{valor}': {e}") from e
+                raise BitrixError(f"Fecha invalida '{valor}': {e}") from e
         raise BitrixError(f"Tipo de fecha no soportado: {type(valor).__name__}")
 
     fecha_inicio = _a_datetime(fecha_inicio)
     fecha_fin = _a_datetime(fecha_fin)
 
     # Params para calendar.event.get (from/to opcionales; Bitrix usa defaults)
-    secciones = await obtener_secciones_user()
+    secciones = await obtener_secciones_user(webhook, bitrix_user_id)
 
-    params_event = {"type": "user", "ownerId": USER_ID}
+    params_event = {"type": "user", "ownerId": bitrix_user_id}
     if secciones:
         params_event["section"] = secciones
     if fecha_inicio is not None:
@@ -256,20 +312,20 @@ async def consultar_ocupacion_bitrix(
         params_event["to"] = (fecha_fin + timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Params para calendar.accessibility.get (from/to obligatorios).
-    # Si no vienen, usamos el rango por defecto de Bitrix (~1 mes atrás, ~3 adelante).
+    # Si no vienen, usamos el rango por defecto de Bitrix (~1 mes atras, ~3 adelante).
     ahora = datetime.now()
     fi_acc = fecha_inicio if fecha_inicio is not None else ahora - timedelta(days=30)
     ff_acc = fecha_fin if fecha_fin is not None else ahora + timedelta(days=90)
     params_acc = {
-        "users": [USER_ID],
+        "users": [bitrix_user_id],
         "from": fi_acc.strftime("%Y-%m-%d"),
         "to": ff_acc.strftime("%Y-%m-%d"),
     }
 
     # Llamadas en paralelo. return_exceptions=True nos deja hacer fallback.
     eventos_res, ocupacion_res = await asyncio.gather(
-        solicitud("calendar.event.get", params_event),
-        solicitud("calendar.accessibility.get", params_acc),
+        solicitud(webhook, "calendar.event.get", params_event),
+        solicitud(webhook, "calendar.accessibility.get", params_acc),
         return_exceptions=True,
     )
     # event.get es el principal: si falla, propagamos.
@@ -280,12 +336,12 @@ async def consultar_ocupacion_bitrix(
 
     # accessibility es un extra: si falla, avisamos y devolvemos solo event.get.
     if isinstance(ocupacion_res, Exception):
-        print(f"BITRIX: aviso, accessibility fallo, sigo sin absences: {ocupacion_res}")
+        print(f"BITRIX: aviso, accessibility fallo para user {bitrix_user_id}, sigo sin absences: {ocupacion_res}")
         return eventos
 
     # accessibility.get devuelve {"user_id_str": [busy_items]}. Extraemos la lista.
     ocupacion_dict = ocupacion_res if isinstance(ocupacion_res, dict) else {}
-    ocupacion_lista = ocupacion_dict.get(str(USER_ID), [])
+    ocupacion_lista = ocupacion_dict.get(str(bitrix_user_id), [])
 
     # Merge por ID, priorizando los eventos ricos de event.get.
     ids_existentes = {str(e.get("ID")) for e in eventos}
@@ -295,15 +351,23 @@ async def consultar_ocupacion_bitrix(
 
     return eventos
 
-async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -> None:
+
+async def modificar_evento_bitrix(
+    webhook: str,
+    bitrix_user_id: int,
+    id: int,
+    evento_actual: dict,
+    cambios: dict,
+) -> None:
     """Modifica un evento existente en Bitrix. Merge de campos: los que
-    están en `cambios` reemplazan, el resto se mantiene desde
-    `evento_actual` (el snapshot obtenido en preparación).
+    estan en `cambios` reemplazan, el resto se mantiene desde
+    `evento_actual` (el snapshot obtenido en preparacion).
 
     Args:
+        webhook, bitrix_user_id: contexto del usuario.
         id: id Bitrix del evento.
         evento_actual: dict tal cual lo devuelve calendar.event.get
-            (mayúsculas: NAME, DATE_FROM, DATE_TO, DESCRIPTION, IMPORTANCE).
+            (mayusculas: NAME, DATE_FROM, DATE_TO, DESCRIPTION, IMPORTANCE).
         cambios: dict con nuestras keys de dominio (nombre, fecha_inicio,
             duracion_min, descripcion, prioridad). Solo las que cambian.
     """
@@ -319,7 +383,7 @@ async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -
     duracion_min = cambios.get("duracion_min", duracion_original_min)
     fecha_fin = fecha_inicio + timedelta(minutes=duracion_min)
 
-    # Descripción e importancia
+    # Descripcion e importancia
     descripcion = cambios.get("descripcion", evento_actual.get("DESCRIPTION", ""))
     if "prioridad" in cambios:
         importance = _MAPEO_IMPORTANCIA[Prioridad(cambios["prioridad"])]
@@ -329,7 +393,7 @@ async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -
     params = {
         "id": id,
         "type": "user",
-        "ownerId": USER_ID,
+        "ownerId": bitrix_user_id,
         "name": nombre,
         "from": fecha_inicio.strftime("%Y-%m-%dT%H:%M:%S"),
         "to": fecha_fin.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -339,9 +403,14 @@ async def modificar_evento_bitrix(id: int, evento_actual: dict, cambios: dict) -
         "timezone_to": "Europe/Madrid",
     }
 
-    await solicitud("calendar.event.update", params)
+    await solicitud(webhook, "calendar.event.update", params)
 
 
-async def eliminar_evento_bitrix(id: int) -> None:
-    """Elimina un evento en Bitrix por su id."""
-    await solicitud("calendar.event.delete", {"id": id})
+async def eliminar_evento_bitrix(webhook: str, bitrix_user_id: int, id: int) -> None:
+    """Elimina un evento en Bitrix por su id.
+
+    Args:
+        webhook, bitrix_user_id: contexto del usuario propietario.
+        id: id Bitrix del evento a borrar.
+    """
+    await solicitud(webhook, "calendar.event.delete", {"id": id})

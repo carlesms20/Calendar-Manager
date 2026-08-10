@@ -1,39 +1,43 @@
 """Endpoint HTTP para el agente. Sirve la misma logica que el bot
-de Telegram pero via HTTP, pensado para que el frontend web del
-dashboard (dentro del iframe) hable con el brain.
+de Telegram pero via HTTP para la mini-app web.
 
 Ademas sirve el frontend React compilado bajo /app/*.
+
+Autorizacion multiusuario:
+- Middleware Basic Auth resuelve credenciales contra USUARIOS_POR_USERNAME.
+- El user_id autenticado se guarda en request.state.user_id.
+- Los endpoints /api/* lo leen y lo propagan a agent y a bitrix.
+- Cada usuario ve/opera SOLO su propio calendario (Carles el suyo,
+  Alexander el suyo). Nunca se mezclan datos.
+- /health se queda sin auth.
 """
 from pathlib import Path
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response as StarletteResponse
 from pydantic import BaseModel
+import base64
+from os import getenv
+from dotenv import load_dotenv
+
 import agent
 import voice
 import tools
 import tts
 import usage
-from bitrix import consultar_eventos_bitrix, BitrixError, consultar_ocupacion_bitrix
-import base64
-import secrets
-from os import getenv
-from fastapi import Request
-from fastapi.responses import Response as StarletteResponse
-from dotenv import load_dotenv
+from bitrix import BitrixError, consultar_ocupacion_bitrix
+from config_usuarios import USUARIOS_POR_USERNAME, autenticar_web, USUARIOS_POR_TELEGRAM_ID
+
 load_dotenv()
 
-APP_USER = getenv("APP_USER", "")
-APP_PASSWORD = getenv("APP_PASSWORD", "")
 
-if not APP_USER or not APP_PASSWORD:
-    print("SERVER WARN: APP_USER/APP_PASSWORD no configurados. /app abierto (dev mode).")
 app = FastAPI(title="Agente SYNCROSFERA")
 
-# CORS: en desarrollo abrimos todo para no pelearse con orígenes locales.
-# En produccion se restringe al dominio del dashboard de David.
+# CORS: en desarrollo abrimos todo para no pelearse con origenes locales.
+# En produccion se puede restringir si algun dia se necesita.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,20 +45,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-@app.middleware("http")
-async def basic_auth_para_app(request: Request, call_next):
-    """Basic Auth SOLO para rutas bajo /app (la mini-app React).
-    /api/*, /health y cualquier otra ruta pasan sin auth: el bot Telegram
-    no la necesita y el frontend hace fetch directo a /api desde JS ya
-    autenticado en el navegador.
 
-    En dev mode (APP_USER o APP_PASSWORD vacios) no aplica auth.
+
+# ---- Basic Auth multiusuario ------------------------------------------------
+# Protege /app (mini-app React) y los endpoints /api que requieren identidad
+# de usuario (/api/mensaje, /api/audio, /api/eventos).
+# /health y /api/usage se dejan abiertos (health para monitorizacion,
+# usage porque agrega solo por user_id explicito en query).
+
+_RUTAS_PROTEGIDAS_PREFIJOS = (
+    "/app",
+    "/api/mensaje",
+    "/api/audio",
+    "/api/eventos",
+)
+
+
+@app.middleware("http")
+async def basic_auth_multiusuario(request: Request, call_next):
+    """Basic Auth contra USUARIOS_POR_USERNAME.
+
+    - /health, /api/tts y /api/usage pasan sin auth (no requieren identidad).
+    - /app, /api/mensaje, /api/audio, /api/eventos exigen credenciales.
+    - Tras autenticar, guarda user_id en request.state para que el
+      endpoint lo use.
+    - En dev mode (ningun usuario tiene password configurada) deja pasar
+      sin auth pero avisa por consola.
     """
     path = request.url.path
-    if not path.startswith("/app"):
+    protegida = any(path.startswith(p) for p in _RUTAS_PROTEGIDAS_PREFIJOS)
+    if not protegida:
         return await call_next(request)
 
-    if not APP_USER or not APP_PASSWORD:
+    # Dev mode: si NINGUN usuario tiene password, aceptamos sin auth y
+    # asignamos un user_id por defecto (el primero disponible). Util
+    # cuando pruebas en local sin haber configurado el .env todavia.
+    hay_algun_password = any(u.get("app_password") for u in USUARIOS_POR_USERNAME.values())
+    if not hay_algun_password:
+        print("SERVER WARN: ningun APP_PASSWORD_* configurado. Auth desactivada (dev mode).")
+        # Asignamos user_id por defecto: prefiere 'carles' (dev), luego 'alexander'
+        request.state.user_id = "carles" if "carles" in USUARIOS_POR_USERNAME else "alexander"
         return await call_next(request)
 
     auth_header = request.headers.get("Authorization", "")
@@ -67,24 +97,34 @@ async def basic_auth_para_app(request: Request, call_next):
 
     try:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-        user, _, password = decoded.partition(":")
+        username, _, password = decoded.partition(":")
     except Exception:
         return StarletteResponse(
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Syncrosfera"'},
         )
 
-    user_ok = secrets.compare_digest(user, APP_USER)
-    pass_ok = secrets.compare_digest(password, APP_PASSWORD)
-    if not (user_ok and pass_ok):
+    usuario = autenticar_web(username, password)
+    if usuario is None:
         return StarletteResponse(
             content="Credenciales invalidas",
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Syncrosfera"'},
         )
 
+    request.state.user_id = usuario["user_id"]
     return await call_next(request)
 
+
+def _user_id_de(request: Request) -> str:
+    """Extrae user_id del request state. Solo valido dentro de rutas
+    protegidas por el middleware. Si por error se llama desde una ruta
+    abierta, cae a 'carles' como default (nunca deberia ocurrir en el
+    flujo normal — es defensivo)."""
+    return getattr(request.state, "user_id", "carles")
+
+
+# ---- Modelos Pydantic -------------------------------------------------------
 
 class MensajeTexto(BaseModel):
     """Payload del endpoint de texto."""
@@ -119,30 +159,28 @@ class ListaEventos(BaseModel):
     eventos: list[EventoResumen]
 
 
+# ---- Health ----------------------------------------------------------------
+
 @app.get("/health")
 async def health():
-    """Ping simple para monitorizar que el servicio esta vivo."""
+    """Ping simple para monitorizar que el servicio esta vivo. Sin auth."""
     return {"status": "ok"}
 
 
-async def _procesar_y_detectar_cambios(texto: str) -> RespuestaAgente:
+# ---- Pipeline compartido: texto -> agente -> respuesta ---------------------
+
+async def _procesar_y_detectar_cambios(user_id: str, texto: str) -> RespuestaAgente:
     """Envuelve agent.procesar_input y detecta si la agenda cambio.
 
-    Estrategia: comparamos el numero de operaciones confirmadas ANTES
-    de procesar vs DESPUES. Si hubo un confirmar_operaciones_pendientes
-    exitoso, el buffer se vacia — pero eso no lo vemos directamente.
-    Lo que si vemos es que si el mensaje del usuario disparo una
-    confirmacion, el reply del agente lo va a decir ("he creado...",
-    "operacion completada..."). Buscamos esas senales en la respuesta.
+    Deteccion heuristica: buscamos frases tipicas en la respuesta que
+    indican que el agente ejecuto algo. No es 100% preciso pero acierta
+    el 95% de las veces. En el peor caso, refrescamos de mas.
 
     Alternativa mas robusta a futuro: que confirmar_operaciones_pendientes
-    guarde un flag en un modulo compartido.
+    guarde un flag en un modulo compartido indexado por user_id.
     """
-    reply = await agent.procesar_input("alexander", texto)
+    reply = await agent.procesar_input(user_id, texto)
 
-    # Deteccion heuristica: buscamos frases tipicas en la respuesta que
-    # indican que el agente ejecuto algo. No es 100% preciso pero acierta
-    # el 95% de las veces. En el peor caso, refrescamos de mas.
     senales = [
         "he creado", "he movido", "he eliminado", "he cancelado",
         "he agendado", "he confirmado", "he reprogramado", "he actualizado",
@@ -155,40 +193,56 @@ async def _procesar_y_detectar_cambios(texto: str) -> RespuestaAgente:
     return RespuestaAgente(reply=reply, agenda_modificada=modificada)
 
 
+# ---- Endpoints principales -------------------------------------------------
+
 @app.post("/api/mensaje", response_model=RespuestaAgente)
-async def mensaje_texto(payload: MensajeTexto):
-    """Recibe un mensaje escrito y devuelve la respuesta del agente."""
+async def mensaje_texto(payload: MensajeTexto, request: Request):
+    """Recibe un mensaje escrito y devuelve la respuesta del agente,
+    procesado contra el contexto del usuario autenticado."""
+    user_id = _user_id_de(request)
+
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="El texto no puede estar vacio")
 
     try:
-        return await _procesar_y_detectar_cambios(payload.text)
+        return await _procesar_y_detectar_cambios(user_id, payload.text)
     except Exception as e:
-        print(f"SERVER: error procesando mensaje: {type(e).__name__}: {e}")
+        print(f"SERVER[{user_id}]: error procesando mensaje: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Error procesando el mensaje")
 
 
 @app.post("/api/audio", response_model=RespuestaAgente)
-async def mensaje_audio(audio: UploadFile = File(...)):
+async def mensaje_audio(request: Request, audio: UploadFile = File(...)):
     """Recibe un audio del navegador, lo transcribe con Gemini, y procesa
-    el texto resultante por el mismo pipeline que un mensaje escrito."""
+    el texto resultante por el mismo pipeline que un mensaje escrito.
+    Contra el contexto del usuario autenticado."""
+    user_id = _user_id_de(request)
+
     audio_bytes = await audio.read()
     mime_type = audio.content_type or "audio/webm"
 
     try:
         texto = await voice.transcribir(audio_bytes, mime_type=mime_type)
-        print(f"SERVER: audio transcrito: '{texto}'")
+        print(f"SERVER[{user_id}]: audio transcrito: '{texto}'")
     except Exception as e:
-        print(f"SERVER: error transcribiendo: {type(e).__name__}: {e}")
+        print(f"SERVER[{user_id}]: error transcribiendo: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="No he podido entender el audio")
 
+    # Filtro anti-basura (mismo criterio que bot.py)
+    texto_limpio = texto.strip()
+    if len(texto_limpio) < 3 or texto_limpio in {"00:00", "0:00", "...", "…"}:
+        print(f"SERVER[{user_id}]: audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando")
+        return RespuestaAgente(
+            reply="No he entendido el audio, intentalo de nuevo por favor.",
+            agenda_modificada=False,
+        )
+
     try:
-        return await _procesar_y_detectar_cambios(texto)
+        return await _procesar_y_detectar_cambios(user_id, texto_limpio)
     except Exception as e:
-        print(f"SERVER: error procesando: {type(e).__name__}: {e}")
+        print(f"SERVER[{user_id}]: error procesando: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Error procesando el mensaje")
 
-from fastapi.responses import Response
 
 @app.post("/api/tts")
 async def sintetizar_voz(payload: MensajeTTS):
@@ -196,13 +250,15 @@ async def sintetizar_voz(payload: MensajeTTS):
 
     Free tier: 10 llamadas al dia. El frontend cachea el blob por mensaje
     para no gastar cuota al pulsar play varias veces sobre el mismo.
+
+    NO requiere auth: el texto que se sintetiza es la respuesta del
+    agente que el propio frontend ya tiene, no filtra datos ajenos.
     """
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="El texto no puede estar vacio")
 
     if len(payload.text) > 5000:
         # Limite arbitrario para no gastar tokens en respuestas larguisimas.
-        # Gemini acepta hasta 8000 bytes de input, dejamos margen.
         raise HTTPException(status_code=413, detail="Texto demasiado largo para TTS")
 
     try:
@@ -216,6 +272,9 @@ async def sintetizar_voz(payload: MensajeTTS):
         raise HTTPException(status_code=500, detail="Error generando el audio")
 
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+# ---- /api/eventos ----------------------------------------------------------
 
 def _parsear_fecha_bitrix(s: str) -> datetime:
     """Bitrix devuelve fechas en tres formatos:
@@ -237,12 +296,32 @@ def _parsear_fecha_bitrix(s: str) -> datetime:
 
 @app.get("/api/eventos", response_model=ListaEventos)
 async def listar_eventos(
+    request: Request,
     desde: str | None = Query(None, description="ISO 8601, ej: 2026-08-03T00:00:00"),
     hasta: str | None = Query(None, description="ISO 8601, ej: 2026-08-10T00:00:00"),
 ):
-    """Devuelve los eventos del calendario en el rango dado.
-    Si no se pasan fechas, devuelve la semana en curso (lunes-domingo).
+    """Devuelve los eventos del calendario del usuario autenticado en el
+    rango dado. Si no se pasan fechas, devuelve la semana en curso
+    (lunes-domingo).
+
+    El calendario que se lee es el del usuario que hizo el Basic Auth:
+    si Carles se autentica ve su calendario, si Alexander se autentica
+    ve el suyo. Nunca se mezclan.
     """
+    user_id = _user_id_de(request)
+
+    # Resolver contexto Bitrix del usuario autenticado
+    usuario = USUARIOS_POR_USERNAME.get(user_id)
+    if usuario is None:
+        raise HTTPException(status_code=500, detail=f"Usuario '{user_id}' no configurado.")
+    webhook = usuario.get("webhook_bitrix", "")
+    bitrix_uid = usuario.get("bitrix_user_id", 0)
+    if not webhook or not bitrix_uid:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Usuario '{user_id}' sin contexto Bitrix (falta webhook o bitrix_user_id).",
+        )
+
     # Rango por defecto: semana en curso
     if desde is None or hasta is None:
         hoy = datetime.now()
@@ -259,7 +338,7 @@ async def listar_eventos(
             raise HTTPException(status_code=400, detail="Fechas invalidas, usa ISO 8601")
 
     try:
-        raw = await consultar_ocupacion_bitrix(desde_dt, hasta_dt)
+        raw = await consultar_ocupacion_bitrix(webhook, bitrix_uid, desde_dt, hasta_dt)
     except BitrixError as e:
         raise HTTPException(status_code=502, detail=f"Bitrix rechazo la peticion: {e}")
 
@@ -271,13 +350,13 @@ async def listar_eventos(
         date_from = e.get("DATE_FROM")
         date_to = e.get("DATE_TO")
         if not date_from or not date_to:
-            print(f"SERVER: evento sin fechas, salto (ID={e.get('ID', '?')}, NAME={e.get('NAME', '?')})")
+            print(f"SERVER[{user_id}]: evento sin fechas, salto (ID={e.get('ID', '?')}, NAME={e.get('NAME', '?')})")
             continue
         try:
             fi = _parsear_fecha_bitrix(date_from)
             ff = _parsear_fecha_bitrix(date_to)
         except ValueError as err:
-            print(f"SERVER: fecha invalida en evento {e.get('ID', '?')}: {err}")
+            print(f"SERVER[{user_id}]: fecha invalida en evento {e.get('ID', '?')}: {err}")
             continue
 
         # Eventos all-day: Bitrix suele darlos como DATE_FROM == DATE_TO
@@ -303,6 +382,8 @@ async def listar_eventos(
     return ListaEventos(eventos=eventos)
 
 
+# ---- /api/usage ------------------------------------------------------------
+
 @app.get("/api/usage")
 async def obtener_uso(
     user_id: str | None = Query(None, description="Filtra por usuario. Si se omite, agrega todos."),
@@ -312,12 +393,14 @@ async def obtener_uso(
     """Totales agregados de consumo de tokens y coste USD.
 
     Sin params, devuelve el total historico agregado de todos los usuarios.
-    Con user_id="alexander" y sin rango, devuelve el total de Alexander.
+    Con user_id="carles" o user_id="alexander" filtra por usuario.
     Con rango, filtra por fecha.
 
     El campo cache_hit_ratio indica cuanto del input viene del cache:
     >0.5 significa que el prompt caching esta pegando bien en conversaciones
     de multiples turnos. Si es 0, el cache no esta funcionando.
+
+    NO requiere Basic Auth: es un endpoint de metricas agregadas.
     """
     desde_dt: datetime | None = None
     hasta_dt: datetime | None = None
@@ -352,7 +435,9 @@ if FRONTEND_DIST.exists():
     @app.get("/app")
     @app.get("/app/{path:path}")
     async def servir_frontend(path: str = ""):
-        """Sirve index.html para cualquier ruta bajo /app."""
+        """Sirve index.html para cualquier ruta bajo /app.
+        La proteccion Basic Auth la aplica el middleware antes de llegar aqui.
+        """
         return FileResponse(str(FRONTEND_DIST / "index.html"))
 else:
     print("SERVER: aviso - frontend/dist no existe. En dev usa 'npm run dev' aparte.")

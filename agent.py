@@ -1,9 +1,16 @@
 """Cerebro del agente. Migrado de Gemini a Anthropic Sonnet 5.
 
-Contrato con el resto del sistema (no cambia respecto a la version Gemini):
+Contrato con el resto del sistema:
 - procesar_input(user_id, texto) -> str          : entrada publica (bot + server).
-- process_message(history, resumen) -> str       : brain con tools.
-- summarize(history, resumen_previo) -> str      : resumen acumulativo.
+- process_message(user_id, history, resumen) -> str : brain con tools.
+- summarize(user_id, history, resumen_previo) -> str : resumen acumulativo.
+
+Multiusuario: user_id se propaga en toda la cadena (procesar_input ->
+process_message -> _ejecutar_tool -> tool async concreta). Las tools
+que tocan Bitrix o el buffer de operaciones lo usan para aislar
+contextos entre Carles y Alexander. El schema JSON expuesto al LLM NO
+incluye user_id: agent._ejecutar_tool lo inyecta en el momento de
+llamar a la funcion Python real.
 
 Decisiones de diseno (ver conversacion Carles<->Claude para el rationale):
 - tool_choice={"type": "any"}: el modelo SIEMPRE devuelve tool_use. Cierra
@@ -243,6 +250,12 @@ antes:
 # tools entero (Anthropic cachea "hasta y desde el ultimo breakpoint"
 # hacia atras). Ahorra ~90% en tokens de tools en llamadas subsecuentes
 # dentro de la ventana de 5 min del cache ephemeral.
+#
+# IMPORTANTE: los schemas NO incluyen user_id. Es un parametro
+# transversal que agent._ejecutar_tool inyecta al llamar a la funcion
+# Python real. El modelo no debe verlo (no tiene por que preocuparse
+# de a que usuario esta atendiendo — el bot/server ya lo resolvieron
+# antes de llamar al brain).
 
 TOOLS_SCHEMA = [
     {
@@ -472,8 +485,13 @@ def _json_default(obj):
     raise TypeError(f"Tipo no serializable: {type(obj).__name__}")
 
 
-async def _ejecutar_tool(name: str, input_args: dict) -> tuple[dict, bool]:
+async def _ejecutar_tool(user_id: str, name: str, input_args: dict) -> tuple[dict, bool]:
     """Ejecuta una tool no-terminal y devuelve (resultado, is_error).
+
+    Inyecta user_id como primer argumento posicional a la tool real,
+    aunque el schema JSON expuesto al LLM no lo incluye. Esto mantiene
+    la abstraccion: el modelo razona sobre operaciones, el sistema
+    resuelve contra que usuario aplican.
 
     is_error se pone a True cuando el retorno lleva ok=False o cuando la
     tool lanza una excepcion. Anthropic usa este flag para saber que el
@@ -490,9 +508,13 @@ async def _ejecutar_tool(name: str, input_args: dict) -> tuple[dict, bool]:
         )
 
     try:
-        resultado = await fn(**input_args)
+        # user_id va como kwarg para no chocar con el orden de argumentos
+        # que el modelo espera (nombre, duracion_min, etc.). tools.py
+        # define user_id como primer parametro obligatorio en cada async
+        # def, asi que python lo aceptara sin ambiguedad.
+        resultado = await fn(user_id=user_id, **input_args)
     except Exception as e:
-        print(f"AGENT: tool '{name}' lanzó excepción: {type(e).__name__}: {e}")
+        print(f"AGENT[{user_id}]: tool '{name}' lanzo excepcion: {type(e).__name__}: {e}")
         return (
             {"ok": False, "error": f"{type(e).__name__}: {e}"},
             True,
@@ -504,17 +526,18 @@ async def _ejecutar_tool(name: str, input_args: dict) -> tuple[dict, bool]:
 
 # --------------------- BRAIN ------------------------------------------
 
-async def process_message(history: list, resumen: str) -> str:
+async def process_message(user_id: str, history: list, resumen: str) -> str:
     """Loop iterativo del agente. Devuelve el texto final para el usuario.
 
     En cada iteracion:
     1. Llama a Claude con tool_choice={"type":"any"} (fuerza tool_use).
     2. Separa tools no-terminales (datos/acciones sobre buffer) de
        responder_texto.
-    3. Si hay no-terminales: las ejecuta, mete los tool_result y sigue.
-       Si venia mezclado responder_texto, se le devuelve un tool_result
-       de error explicandolo (Anthropic exige matching 1:1 tool_use ↔
-       tool_result) y el modelo re-decide con datos ya en contexto.
+    3. Si hay no-terminales: las ejecuta pasando user_id, mete los
+       tool_result y sigue. Si venia mezclado responder_texto, se le
+       devuelve un tool_result de error explicandolo (Anthropic exige
+       matching 1:1 tool_use <-> tool_result) y el modelo re-decide con
+       datos ya en contexto.
     4. Si solo hay responder_texto: cierra turno con su mensaje.
 
     Se sale del loop por: respuesta terminal, iteracion sin tool_use
@@ -585,24 +608,24 @@ async def process_message(history: list, resumen: str) -> str:
         cache_read = getattr(response_usage, "cache_read_input_tokens", 0) or 0
         cache_write = getattr(response_usage, "cache_creation_input_tokens", 0) or 0
         print(
-            f"AGENT it={iteracion}: stop={response.stop_reason} "
+            f"AGENT[{user_id}] it={iteracion}: stop={response.stop_reason} "
             f"in={response_usage.input_tokens} out={response_usage.output_tokens} "
             f"cache_read={cache_read} cache_write={cache_write}"
         )
-        await usage.registrar("alexander", response_usage, MODELO, contexto="brain")
+        await usage.registrar(user_id, response_usage, MODELO, contexto="brain")
 
         # Extraemos los bloques tool_use del content.
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         no_terminales = [b for b in tool_uses if b.name != "responder_texto"]
         terminal = next((b for b in tool_uses if b.name == "responder_texto"), None)
 
-        print(f"AGENT it={iteracion}: tool_uses={[b.name for b in tool_uses]}")
+        print(f"AGENT[{user_id}] it={iteracion}: tool_uses={[b.name for b in tool_uses]}")
 
         if no_terminales:
             # Ejecutar las no-terminales y construir los tool_result.
             tool_results = []
             for tu in no_terminales:
-                resultado, is_error = await _ejecutar_tool(tu.name, tu.input)
+                resultado, is_error = await _ejecutar_tool(user_id, tu.name, tu.input)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,
@@ -617,8 +640,8 @@ async def process_message(history: list, resumen: str) -> str:
             # siguiente request.
             if terminal is not None:
                 print(
-                    f"AGENT: responder_texto ignorado (vino mezclado con "
-                    f"{[t.name for t in no_terminales]}); se re-decidirá con los datos"
+                    f"AGENT[{user_id}]: responder_texto ignorado (vino mezclado con "
+                    f"{[t.name for t in no_terminales]}); se re-decidira con los datos"
                 )
                 tool_results.append({
                     "type": "tool_result",
@@ -644,7 +667,7 @@ async def process_message(history: list, resumen: str) -> str:
 
         # Ni tools ni responder_texto: con tool_choice=any esto no deberia
         # pasar salvo max_tokens o stop_reason inesperado. Cortamos limpio.
-        print(f"AGENT WARN: iteración {iteracion} sin tool_use, stop={response.stop_reason}")
+        print(f"AGENT[{user_id}] WARN: iteracion {iteracion} sin tool_use, stop={response.stop_reason}")
         break
 
     return "El agente no pudo resolver la petición, reformula por favor."
@@ -652,12 +675,13 @@ async def process_message(history: list, resumen: str) -> str:
 
 # --------------------- SUMMARIZE --------------------------------------
 
-async def summarize(history: list, resumen_previo: str = "") -> str:
-    """Fusiona resumen previo + mensajes nuevos en un nuevo resumen único.
+async def summarize(user_id: str, history: list, resumen_previo: str = "") -> str:
+    """Fusiona resumen previo + mensajes nuevos en un nuevo resumen unico.
 
     Se llama desde procesar_input cuando check_history detecta que se
-    ha pasado el umbral. Corre en single-shot (sin tools, sin cache)
-    y con temp 0.2 para dar algo de fluidez sin sacrificar consistencia.
+    ha pasado el umbral. Corre en single-shot (sin tools, sin cache).
+    user_id se usa solo para el registro de coste en usage — el prompt
+    en si es agnostico al usuario.
     """
     lineas = []
     for msg in history:
@@ -700,7 +724,7 @@ NUEVOS MENSAJES:
         max_tokens=MAX_TOKENS_SUMMARY,
         messages=[{"role": "user", "content": prompt}],
     )
-    await usage.registrar("alexander", response.usage, MODELO, contexto="summary")
+    await usage.registrar(user_id, response.usage, MODELO, contexto="summary")
 
     # response.content es lista de bloques; sin tools esperamos un solo
     # TextBlock. Iteramos por defensa por si viniera vacio.
@@ -717,6 +741,10 @@ async def procesar_input(user_id: str, texto: str) -> str:
     resumen si toca, llama al brain con tools, guarda respuesta y devuelve
     el texto final. Es la funcion que comparten el bot Telegram y el
     endpoint HTTP: ambos son solo capas de transporte sobre esto.
+
+    user_id se propaga end-to-end: memory (Supabase indexado por usuario),
+    summarize (registro de coste), process_message (ejecucion de tools
+    contra el Bitrix correcto).
     """
     try:
         await memory.save_message(user_id, "user", texto)
@@ -725,15 +753,15 @@ async def procesar_input(user_id: str, texto: str) -> str:
             history = await memory.get_history(user_id)
             old_msg = history[:8]
             resumen_previo = await memory.get_resumen(user_id)
-            nuevo_resumen = await summarize(old_msg, resumen_previo)
+            nuevo_resumen = await summarize(user_id, old_msg, resumen_previo)
             await memory.set_resumen(user_id, nuevo_resumen)
             await memory.del_history(user_id, n=8)
 
         prompt = await memory.get_history(user_id)
         resumen = await memory.get_resumen(user_id)
-        respuesta = await process_message(prompt, resumen)
+        respuesta = await process_message(user_id, prompt, resumen)
         await memory.save_message(user_id, "model", respuesta)
         return respuesta
     except Exception as e:
-        print(f"AGENT: error en procesar_input: {type(e).__name__}: {e}")
+        print(f"AGENT[{user_id}]: error en procesar_input: {type(e).__name__}: {e}")
         return "He tenido un problema procesando tu mensaje. ¿Puedes intentarlo de nuevo o reformularlo?"
