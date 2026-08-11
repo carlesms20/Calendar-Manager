@@ -16,6 +16,8 @@ from google.genai import types
 from os import getenv
 from dotenv import load_dotenv
 
+import logger
+
 load_dotenv()
 TOKEN = getenv("API_GEMINI")
 _client = genai.Client(api_key=TOKEN)
@@ -73,11 +75,19 @@ async def sintetizar(texto: str, voz: str = VOZ_DEFECTO) -> bytes:
                 ultimo_error = e
                 if intento < 2:
                     delay = 2.0 * (2 ** intento)
-                    print(f"TTS: 503 con {modelo}, reintento en {delay}s ({intento + 1}/3)")
+                    logger.warn(
+                        "tts", "gemini_503_retry",
+                        f"503 con {modelo}, reintento en {delay}s ({intento + 1}/3)",
+                        metadata={"modelo": modelo, "intento": intento + 1, "delay_s": delay},
+                    )
                     await asyncio.sleep(delay)
                     continue
                 if modelo == MODELO_PRIMARIO:
-                    print(f"TTS: {MODELO_PRIMARIO} agotado, cambio a {MODELO_FALLBACK}")
+                    logger.warn(
+                        "tts", "gemini_fallback",
+                        f"{MODELO_PRIMARIO} agotado, cambio a {MODELO_FALLBACK}",
+                        metadata={"desde": MODELO_PRIMARIO, "hacia": MODELO_FALLBACK},
+                    )
 
     raise ultimo_error
 

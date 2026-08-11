@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.responses import Response as StarletteResponse
 from pydantic import BaseModel
 import base64
@@ -28,6 +28,7 @@ import voice
 import tools
 import tts
 import usage
+import logger
 from bitrix import BitrixError, consultar_ocupacion_bitrix
 from config_usuarios import USUARIOS_POR_USERNAME, autenticar_web, USUARIOS_POR_TELEGRAM_ID
 
@@ -82,7 +83,11 @@ async def basic_auth_multiusuario(request: Request, call_next):
     # cuando pruebas en local sin haber configurado el .env todavia.
     hay_algun_password = any(u.get("app_password") for u in USUARIOS_POR_USERNAME.values())
     if not hay_algun_password:
-        print("SERVER WARN: ningun APP_PASSWORD_* configurado. Auth desactivada (dev mode).")
+        logger.warn(
+            "server", "auth_dev_mode",
+            "Ningun APP_PASSWORD_* configurado. Auth desactivada (dev mode).",
+            metadata={"path": path},
+        )
         # Asignamos user_id por defecto: prefiere 'carles' (dev), luego 'alexander'
         request.state.user_id = "carles" if "carles" in USUARIOS_POR_USERNAME else "alexander"
         return await call_next(request)
@@ -159,6 +164,19 @@ class ListaEventos(BaseModel):
     eventos: list[EventoResumen]
 
 
+# ---- Root redirect ---------------------------------------------------------
+
+@app.get("/")
+async def root_redirect():
+    """La raiz redirige a /app (donde vive la mini-app React).
+
+    Evita que un curl o un click en la URL raiz devuelva 404 y da una
+    experiencia limpia al abrir el dominio sin sufijo. La proteccion
+    Basic Auth de /app la aplica el middleware al hacer follow del 302.
+    """
+    return RedirectResponse(url="/app", status_code=302)
+
+
 # ---- Health ----------------------------------------------------------------
 
 @app.get("/health")
@@ -207,7 +225,13 @@ async def mensaje_texto(payload: MensajeTexto, request: Request):
     try:
         return await _procesar_y_detectar_cambios(user_id, payload.text)
     except Exception as e:
-        print(f"SERVER[{user_id}]: error procesando mensaje: {type(e).__name__}: {e}")
+        logger.error(
+            "server", "request_error",
+            f"Error procesando mensaje texto: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"endpoint": "/api/mensaje", "texto_input": (payload.text or "")[:500]},
+            error=e,
+        )
         raise HTTPException(status_code=500, detail="Error procesando el mensaje")
 
 
@@ -223,15 +247,31 @@ async def mensaje_audio(request: Request, audio: UploadFile = File(...)):
 
     try:
         texto = await voice.transcribir(audio_bytes, mime_type=mime_type)
-        print(f"SERVER[{user_id}]: audio transcrito: '{texto}'")
+        logger.info(
+            "server", "audio_transcribed",
+            f"Audio transcrito: '{texto[:200]}'",
+            user_id=user_id,
+            metadata={"mime_type": mime_type, "bytes": len(audio_bytes)},
+        )
     except Exception as e:
-        print(f"SERVER[{user_id}]: error transcribiendo: {type(e).__name__}: {e}")
+        logger.error(
+            "server", "audio_transcription_error",
+            f"Error transcribiendo audio: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"mime_type": mime_type, "bytes": len(audio_bytes)},
+            error=e,
+        )
         raise HTTPException(status_code=500, detail="No he podido entender el audio")
 
     # Filtro anti-basura (mismo criterio que bot.py)
     texto_limpio = texto.strip()
     if len(texto_limpio) < 3 or texto_limpio in {"00:00", "0:00", "...", "…"}:
-        print(f"SERVER[{user_id}]: audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando")
+        logger.info(
+            "server", "audio_filtered_as_noise",
+            f"Audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando",
+            user_id=user_id,
+            metadata={"texto_transcrito": texto_limpio},
+        )
         return RespuestaAgente(
             reply="No he entendido el audio, intentalo de nuevo por favor.",
             agenda_modificada=False,
@@ -240,7 +280,13 @@ async def mensaje_audio(request: Request, audio: UploadFile = File(...)):
     try:
         return await _procesar_y_detectar_cambios(user_id, texto_limpio)
     except Exception as e:
-        print(f"SERVER[{user_id}]: error procesando: {type(e).__name__}: {e}")
+        logger.error(
+            "server", "request_error",
+            f"Error procesando audio->texto: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"endpoint": "/api/audio", "texto_input": texto_limpio[:500]},
+            error=e,
+        )
         raise HTTPException(status_code=500, detail="Error procesando el mensaje")
 
 
@@ -266,9 +312,19 @@ async def sintetizar_voz(payload: MensajeTTS):
     except Exception as e:
         mensaje = str(e).lower()
         if "429" in mensaje or "resource_exhausted" in mensaje or "quota" in mensaje:
-            print(f"SERVER: cuota TTS agotada: {e}")
+            logger.warn(
+                "server", "tts_quota_exhausted",
+                f"Cuota TTS agotada: {e}",
+                metadata={"texto_len": len(payload.text)},
+                error=e,
+            )
             raise HTTPException(status_code=429, detail="Cuota diaria de TTS agotada")
-        print(f"SERVER: error TTS: {type(e).__name__}: {e}")
+        logger.error(
+            "server", "tts_error",
+            f"Error TTS: {type(e).__name__}: {e}",
+            metadata={"texto_len": len(payload.text)},
+            error=e,
+        )
         raise HTTPException(status_code=500, detail="Error generando el audio")
 
     return Response(content=wav_bytes, media_type="audio/wav")
@@ -346,17 +402,29 @@ async def listar_eventos(
     _IMPORTANCE_A_PRIORIDAD = {"high": "alta", "normal": "media", "low": "baja"}
 
     eventos = []
+    eventos_sin_fecha = 0
+    eventos_fecha_invalida = 0
     for e in raw:
         date_from = e.get("DATE_FROM")
         date_to = e.get("DATE_TO")
         if not date_from or not date_to:
-            print(f"SERVER[{user_id}]: evento sin fechas, salto (ID={e.get('ID', '?')}, NAME={e.get('NAME', '?')})")
+            eventos_sin_fecha += 1
             continue
         try:
             fi = _parsear_fecha_bitrix(date_from)
             ff = _parsear_fecha_bitrix(date_to)
         except ValueError as err:
-            print(f"SERVER[{user_id}]: fecha invalida en evento {e.get('ID', '?')}: {err}")
+            eventos_fecha_invalida += 1
+            logger.warn(
+                "server", "event_invalid_date",
+                f"Fecha invalida en evento {e.get('ID', '?')}: {err}",
+                user_id=user_id,
+                metadata={
+                    "bitrix_id": str(e.get("ID", "")),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                },
+            )
             continue
 
         # Eventos all-day: Bitrix suele darlos como DATE_FROM == DATE_TO
@@ -378,6 +446,22 @@ async def listar_eventos(
             descripcion=e.get("DESCRIPTION", "") or "",
             prioridad=prioridad,
         ))
+
+    # Un unico log agregado al final del batch en vez de un print por
+    # evento skipeado, para no spamear stdout ni la tabla app_logs.
+    if eventos_sin_fecha or eventos_fecha_invalida:
+        logger.info(
+            "server", "events_skipped_summary",
+            f"Eventos skipeados: {eventos_sin_fecha} sin fechas, "
+            f"{eventos_fecha_invalida} con fecha invalida",
+            user_id=user_id,
+            metadata={
+                "total_raw": len(raw),
+                "sin_fecha": eventos_sin_fecha,
+                "fecha_invalida": eventos_fecha_invalida,
+                "aceptados": len(eventos),
+            },
+        )
 
     return ListaEventos(eventos=eventos)
 
@@ -415,7 +499,16 @@ async def obtener_uso(
     try:
         return await usage.resumen(user_id=user_id, desde=desde_dt, hasta=hasta_dt)
     except Exception as e:
-        print(f"SERVER: error consultando usage: {type(e).__name__}: {e}")
+        logger.error(
+            "server", "usage_query_error",
+            f"Error consultando usage: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={
+                "desde": desde_dt.isoformat() if desde_dt else None,
+                "hasta": hasta_dt.isoformat() if hasta_dt else None,
+            },
+            error=e,
+        )
         raise HTTPException(status_code=500, detail="Error consultando uso")
 
 
@@ -440,7 +533,11 @@ if FRONTEND_DIST.exists():
         """
         return FileResponse(str(FRONTEND_DIST / "index.html"))
 else:
-    print("SERVER: aviso - frontend/dist no existe. En dev usa 'npm run dev' aparte.")
+    logger.warn(
+        "server", "frontend_dist_missing",
+        "frontend/dist no existe. En dev usa 'npm run dev' aparte.",
+        metadata={"expected_path": str(FRONTEND_DIST)},
+    )
 
 
 if __name__ == "__main__":

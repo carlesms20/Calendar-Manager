@@ -24,19 +24,25 @@ from aiogram.types import Message
 import agent
 import memory
 import voice
+import logger
 from config_usuarios import USUARIOS_POR_TELEGRAM_ID, usuario_por_telegram_id
 
 load_dotenv()
 TOKEN = getenv("API_BOT")
 
 if not USUARIOS_POR_TELEGRAM_ID:
-    print(
-        "BOT WARN: USUARIOS_POR_TELEGRAM_ID esta vacio. "
-        "Configura CARLES_TELEGRAM_ID y/o ALEXANDER_TELEGRAM_ID en el .env. "
-        "Sin ellos, el bot rechazara todos los mensajes."
+    logger.warn(
+        "bot", "no_authorized_users",
+        "USUARIOS_POR_TELEGRAM_ID vacio. Configura CARLES_TELEGRAM_ID "
+        "y/o ALEXANDER_TELEGRAM_ID en el .env. Sin ellos, el bot "
+        "rechazara todos los mensajes.",
     )
 else:
-    print(f"BOT: {len(USUARIOS_POR_TELEGRAM_ID)} usuario(s) autorizado(s) cargados desde config.")
+    logger.info(
+        "bot", "startup",
+        f"{len(USUARIOS_POR_TELEGRAM_ID)} usuario(s) autorizado(s) cargados desde config.",
+        metadata={"count": len(USUARIOS_POR_TELEGRAM_ID)},
+    )
 
 dp = Dispatcher()
 
@@ -52,10 +58,15 @@ def _resolver_usuario(message: Message) -> dict | None:
 
     usuario = usuario_por_telegram_id(message.from_user.id)
     if usuario is None:
-        print(
-            f"BOT: rechazado user_id={message.from_user.id} "
-            f"username=@{message.from_user.username} "
-            f"nombre={message.from_user.full_name}"
+        logger.warn(
+            "bot", "rejected_unauthorized",
+            f"Rechazado telegram_id={message.from_user.id} "
+            f"username=@{message.from_user.username}",
+            metadata={
+                "telegram_id": message.from_user.id,
+                "telegram_username": message.from_user.username,
+                "telegram_full_name": message.from_user.full_name,
+            },
         )
         return None
 
@@ -74,7 +85,12 @@ async def procesar_texto_usuario(user_id: str, texto: str, message: Message):
     """
     respuesta = await agent.procesar_input(user_id, texto)
     resp_log = respuesta[:200] + ("..." if len(respuesta) > 200 else "")
-    print(f"BOT[{user_id}]: respuesta del agente: '{resp_log}'")
+    logger.info(
+        "bot", "reply_sent",
+        f"Respuesta del agente: '{resp_log}'",
+        user_id=user_id,
+        metadata={"respuesta_len": len(respuesta)},
+    )
     await message.answer(respuesta)
 
 
@@ -85,9 +101,16 @@ async def text_handler(message: Message):
         return
 
     user_id = usuario["user_id"]
-    print(
-        f"BOT[{user_id}]: mensaje texto de {message.from_user.id} "
-        f"(@{message.from_user.username}): '{message.text}'"
+    logger.info(
+        "bot", "message_received",
+        f"Mensaje texto: '{(message.text or '')[:200]}'",
+        user_id=user_id,
+        metadata={
+            "telegram_id": message.from_user.id,
+            "telegram_username": message.from_user.username,
+            "kind": "text",
+            "texto_len": len(message.text or ""),
+        },
     )
     await procesar_texto_usuario(user_id, message.text, message)
 
@@ -109,9 +132,23 @@ async def audio_handler(message: Message):
     # Transcribir con Gemini (bloque try por si falla la API, para no romper el bot)
     try:
         texto = await voice.transcribir(audio_bytes, mime_type=voice_msg.mime_type or "audio/ogg")
-        print(f"BOT[{user_id}]: audio transcrito: '{texto}'")
+        logger.info(
+            "bot", "audio_transcribed",
+            f"Audio transcrito: '{texto[:200]}'",
+            user_id=user_id,
+            metadata={
+                "mime_type": voice_msg.mime_type,
+                "duration": getattr(voice_msg, "duration", None),
+            },
+        )
     except Exception as e:
-        print(f"BOT[{user_id}]: error transcribiendo: {e}")
+        logger.error(
+            "bot", "audio_transcription_error",
+            f"Error transcribiendo audio: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"mime_type": voice_msg.mime_type},
+            error=e,
+        )
         await message.answer("No he podido entender el audio, prueba de nuevo por favor.")
         return
 
@@ -121,7 +158,12 @@ async def audio_handler(message: Message):
     # tokens y produciendo respuestas erraticas.
     texto_limpio = texto.strip()
     if len(texto_limpio) < 3 or texto_limpio in {"00:00", "0:00", "...", "…"}:
-        print(f"BOT[{user_id}]: audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando")
+        logger.info(
+            "bot", "audio_filtered_as_noise",
+            f"Audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando",
+            user_id=user_id,
+            metadata={"texto_transcrito": texto_limpio},
+        )
         await message.answer("No he entendido el audio, intentalo de nuevo por favor.")
         return
 
@@ -135,7 +177,17 @@ async def file_handler(message: Message):
         await message.answer("No autorizado.")
         return
     user_id = usuario["user_id"]
-    print(f"BOT[{user_id}]: recibido file (aun no soportado).")
+    logger.info(
+        "bot", "file_received_unsupported",
+        "Recibido file (aun no soportado).",
+        user_id=user_id,
+        metadata={
+            "telegram_id": message.from_user.id if message.from_user else None,
+            "has_photo": bool(message.photo),
+            "has_document": bool(message.document),
+            "has_video": bool(message.video),
+        },
+    )
 
 
 async def main():

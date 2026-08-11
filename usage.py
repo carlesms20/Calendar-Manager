@@ -21,6 +21,8 @@ from datetime import datetime, timezone, date
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+import logger
+
 load_dotenv()
 
 _SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -131,7 +133,17 @@ async def registrar(user_id: str, usage, modelo: str, contexto: str) -> None:
         }).execute()
     except Exception as e:
         # No propagamos: el brain no puede caer por un log de metricas.
-        print(f"USAGE: fallo al registrar en Supabase: {type(e).__name__}: {e}")
+        logger.warn(
+            "usage", "registration_failed",
+            f"Fallo al registrar en token_usage: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={
+                "modelo": modelo,
+                "contexto": contexto,
+                "coste_usd": coste,
+            },
+            error=e,
+        )
 
 
 # --------------------- CONSULTA ---------------------------------------

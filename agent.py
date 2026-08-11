@@ -37,6 +37,7 @@ from anthropic import AsyncAnthropic
 
 import memory
 import usage
+import logger
 from models import TZ_LOCAL
 from tools import (
     responder_texto,
@@ -501,7 +502,12 @@ async def _ejecutar_tool(user_id: str, name: str, input_args: dict) -> tuple[dic
     """
     fn = _TOOLS_ASYNC.get(name)
     if fn is None:
-        print(f"AGENT WARN: tool desconocida '{name}'")
+        logger.warn(
+            "agent", "tool_unknown",
+            f"Tool desconocida '{name}'",
+            user_id=user_id,
+            metadata={"tool_name": name, "input_args_keys": list(input_args.keys())},
+        )
         return (
             {"ok": False, "error": f"Tool '{name}' no existe. Usa solo las tools registradas."},
             True,
@@ -514,7 +520,13 @@ async def _ejecutar_tool(user_id: str, name: str, input_args: dict) -> tuple[dic
         # def, asi que python lo aceptara sin ambiguedad.
         resultado = await fn(user_id=user_id, **input_args)
     except Exception as e:
-        print(f"AGENT[{user_id}]: tool '{name}' lanzo excepcion: {type(e).__name__}: {e}")
+        logger.error(
+            "agent", "tool_execution_error",
+            f"Tool '{name}' lanzo excepcion: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"tool_name": name, "input_args_keys": list(input_args.keys())},
+            error=e,
+        )
         return (
             {"ok": False, "error": f"{type(e).__name__}: {e}"},
             True,
@@ -639,9 +651,11 @@ async def process_message(user_id: str, history: list, resumen: str) -> str:
             # su tool_result correspondiente; si no, la API rechaza el
             # siguiente request.
             if terminal is not None:
-                print(
-                    f"AGENT[{user_id}]: responder_texto ignorado (vino mezclado con "
-                    f"{[t.name for t in no_terminales]}); se re-decidira con los datos"
+                logger.warn(
+                    "agent", "responder_texto_mezclado_ignorado",
+                    "responder_texto ignorado, vino mezclado con tools de datos; se re-decidira",
+                    user_id=user_id,
+                    metadata={"tools_no_terminales": [t.name for t in no_terminales]},
                 )
                 tool_results.append({
                     "type": "tool_result",
@@ -667,7 +681,12 @@ async def process_message(user_id: str, history: list, resumen: str) -> str:
 
         # Ni tools ni responder_texto: con tool_choice=any esto no deberia
         # pasar salvo max_tokens o stop_reason inesperado. Cortamos limpio.
-        print(f"AGENT[{user_id}] WARN: iteracion {iteracion} sin tool_use, stop={response.stop_reason}")
+        logger.warn(
+            "agent", "iteration_no_tool_use",
+            f"Iteracion {iteracion} sin tool_use, stop={response.stop_reason}",
+            user_id=user_id,
+            metadata={"iteracion": iteracion, "stop_reason": response.stop_reason},
+        )
         break
 
     return "El agente no pudo resolver la petición, reformula por favor."
@@ -763,5 +782,11 @@ async def procesar_input(user_id: str, texto: str) -> str:
         await memory.save_message(user_id, "model", respuesta)
         return respuesta
     except Exception as e:
-        print(f"AGENT[{user_id}]: error en procesar_input: {type(e).__name__}: {e}")
+        logger.error(
+            "agent", "pipeline_error",
+            f"Error en procesar_input: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"texto_input": (texto or "")[:500]},
+            error=e,
+        )
         return "He tenido un problema procesando tu mensaje. ¿Puedes intentarlo de nuevo o reformularlo?"
