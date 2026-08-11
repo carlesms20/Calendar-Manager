@@ -49,6 +49,7 @@ from tools import (
     consultar_eventos,
     listar_eventos_preparados,
     consultar_huecos_libres,
+    gestionar_bloques,
 )
 
 load_dotenv()
@@ -98,6 +99,9 @@ Mapeo pregunta → tool:
 - "cuándo puedo agendar X", "cuándo tengo hueco para Y", "propóneme 
   cuándo hacer Z", cualquier pregunta de disponibilidad para meter 
   algo nuevo → consultar_huecos_libres.
+- "bloquéame X", "protégeme Y", "reserva tiempo para Z", "qué bloques 
+  tengo", "quita el bloque de W" → gestionar_bloques (ver sección más 
+  abajo).
 
 La palabra "pendiente" es ambigua. Si acabamos de preparar eventos y aún 
 no se han confirmado, es el buffer → listar_eventos_preparados. En 
@@ -203,6 +207,47 @@ vuelvas a llamar a consultar_huecos_libres ni a consultar_eventos como
 "El 12 no tienes ningún hueco disponible, lo tienes bloqueado como día 
 libre."
 
+# BLOQUES NO NEGOCIABLES
+El usuario puede tener franjas horarias recurrentes semanales que 
+protege como intocables: gimnasio, comida familiar, tiempo de trabajo 
+profundo, etc. Se llaman "bloques no negociables" y se gestionan con 
+la tool gestionar_bloques.
+
+Los bloques activos se restan AUTOMÁTICAMENTE en consultar_huecos_libres, 
+así que no tienes que pensar en ellos al buscar huecos: la tool ya lo hace.
+
+Mapeo intención → acción:
+- "bloquéame el gym L-V de 7 a 8", "protégeme las mañanas para trabajo 
+  profundo", "resérvame comida familiar los sábados" 
+  → gestionar_bloques(accion="añadir", ...).
+- "qué bloques tengo", "qué tengo protegido", "cuándo tengo gym" 
+  → gestionar_bloques(accion="listar").
+- "quita el bloque del gym", "borra el bloque de trabajo profundo" 
+  → primero listar, luego eliminar con el id correcto. NUNCA inventes ids.
+- "esta semana no voy al gym", "pausa la comida familiar 
+  temporalmente" → desactivar (soft delete: se puede reactivar después).
+
+Días de la semana en formato ISO: 0=lunes, 1=martes, 2=miércoles, 
+3=jueves, 4=viernes, 5=sábado, 6=domingo. "L-V" = [0,1,2,3,4]. 
+"Fin de semana" = [5,6]. "Todos los días" = [0,1,2,3,4,5,6].
+
+# INTERACCIÓN BLOQUES ↔ CREAR EVENTO
+Los bloques NO impiden crear eventos en su franja. Si el usuario pide 
+agendar algo dentro de una franja bloqueada (ej: tiene el gym L-V 
+07:00-08:00 y pide "reunión con Carlos el martes a las 7:30"), tu 
+comportamiento debe ser:
+
+1. Detectar el solape antes de llamar a crear_evento.
+2. Avisar al usuario: "Tienes un bloque de gimnasio de 07:00 a 08:00 
+   los martes. ¿Quieres agendar la reunión igualmente, moverla, o 
+   quitar el bloque?"
+3. Esperar respuesta explícita. Solo entonces actuar.
+
+Para saber si hay solape sin llamar a gestionar_bloques cada turno, 
+puedes fiarte de tu contexto de conversación reciente. Si no estás 
+seguro, llama a gestionar_bloques(accion="listar") una vez y trabaja 
+con esa lista.
+
 # ESTILO DE RESPUESTA
 - Claro, directivo, sin relleno. Tono de management práctico.
 - Prosa natural, como un ejecutivo hablando a otro. No uses headers 
@@ -212,7 +257,6 @@ libre."
 - No inventes datos que no tienes.
 - No inventes sistemas, contadores o protocolos que no existen. Si el 
   usuario dice algo casual, no lo conviertas en mecanismo formal."""
-
 
 def _contexto_dinamico(resumen: str) -> str:
     """Bloque de contexto que cambia turno a turno. NO se cachea.
@@ -443,6 +487,83 @@ TOOLS_SCHEMA = [
         },
     },
     {
+        "name": "gestionar_bloques",
+        "description": (
+            "Gestiona los BLOQUES NO NEGOCIABLES del usuario: franjas "
+            "horarias recurrentes semanales que protege como intocables "
+            "(gym, comida familiar, trabajo profundo...). Los bloques "
+            "activos se restan automaticamente de consultar_huecos_libres. "
+            "Acciones: 'listar' (ver todos), 'añadir' (crear uno nuevo), "
+            "'eliminar' (borrar por id), 'desactivar' (pausar sin borrar). "
+            "Usala cuando el usuario diga cosas como 'bloqueame X', "
+            "'protegeme Y', 'que bloques tengo', 'quita el bloque de Z', "
+            "'esta semana no voy al gym, quitalo temporal'. "
+            "IMPORTANTE: los bloques NO impiden crear eventos en esa "
+            "franja. Si el usuario pide agendar algo dentro de un bloque, "
+            "avisale del solape y pide confirmacion explicita antes de "
+            "meterlo con crear_evento."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "accion": {
+                    "type": "string",
+                    "enum": ["listar", "añadir", "eliminar", "desactivar"],
+                    "description": (
+                        "Que hacer con los bloques. 'listar' no requiere "
+                        "mas parametros. 'añadir' requiere nombre, "
+                        "dias_semana, hora_inicio, hora_fin. 'eliminar' "
+                        "y 'desactivar' requieren id."
+                    ),
+                },
+                "id": {
+                    "type": "integer",
+                    "description": (
+                        "Identificador del bloque, obligatorio para "
+                        "eliminar/desactivar. Usa 'listar' antes para "
+                        "obtenerlo; nunca inventes ids."
+                    ),
+                },
+                "nombre": {
+                    "type": "string",
+                    "description": (
+                        "Titulo corto del bloque, obligatorio para añadir. "
+                        "Ej: 'Gimnasio', 'Comida familiar', 'Trabajo profundo'."
+                    ),
+                },
+                "dias_semana": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                    "description": (
+                        "Lista de dias en formato ISO (0=lunes, 1=martes, "
+                        "2=miercoles, 3=jueves, 4=viernes, 5=sabado, "
+                        "6=domingo). Ej: [0,1,2,3,4] para L-V. "
+                        "Obligatorio para añadir."
+                    ),
+                },
+                "hora_inicio": {
+                    "type": "string",
+                    "description": (
+                        "'HH:MM' en hora local Madrid, obligatorio para "
+                        "añadir. Ej: '07:00'."
+                    ),
+                },
+                "hora_fin": {
+                    "type": "string",
+                    "description": (
+                        "'HH:MM' en hora local Madrid, obligatorio para "
+                        "añadir. Debe ser posterior a hora_inicio. Ej: '08:00'."
+                    ),
+                },
+                "descripcion": {
+                    "type": "string",
+                    "description": "Contexto adicional opcional. Ej: 'gym con Marc'.",
+                },
+            },
+            "required": ["accion"],
+        },
+    },
+    {
         "name": "listar_eventos_preparados",
         "description": (
             "Devuelve el BUFFER INTERNO de operaciones preparadas en el "
@@ -471,6 +592,7 @@ _TOOLS_ASYNC = {
     "consultar_eventos": consultar_eventos,
     "consultar_huecos_libres": consultar_huecos_libres,
     "listar_eventos_preparados": listar_eventos_preparados,
+    "gestionar_bloques": gestionar_bloques,
 }
 
 

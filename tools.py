@@ -474,9 +474,13 @@ async def consultar_huecos_libres(
     """Busca huecos libres en la agenda del usuario.
 
     Devuelve intervalos de tiempo (con etiqueta legible) donde el
-    usuario NO tiene eventos y que duran al menos duracion_min.
-    Respeta horario laboral por defecto (L-S 09:00-20:00) y aplica
-    un margen de 5 min entre eventos.
+    usuario NO tiene eventos ni bloques no negociables activos, y que
+    duran al menos duracion_min. Respeta horario laboral por defecto
+    (L-S 09:00-20:00) y aplica un margen de 5 min entre eventos.
+
+    Los bloques no negociables (gym, comida familiar, tiempo estratégico...)
+    se restan automaticamente. NO hay que pedirlos como parametro: se
+    consultan de la BD del usuario en cada llamada.
 
     Args:
         fecha_desde: rango a inspeccionar. Si None, usa "ahora".
@@ -497,6 +501,7 @@ async def consultar_huecos_libres(
     print(f"TOOL[{user_id}]: consultar_huecos_libres ejecutada")
 
     from models import TZ_LOCAL  # local para no ensuciar el header
+    import bloques  # local para evitar ciclos de import en carga
 
     try:
         webhook, bitrix_uid = _contexto_bitrix(user_id)
@@ -535,6 +540,20 @@ async def consultar_huecos_libres(
     except BitrixError as e:
         return {"ok": False, "mensaje": f"Bitrix rechazo la busqueda: {e}", "huecos": []}
 
+    # Consultar bloques no negociables del usuario (falla suave: si la BD
+    # peta, seguimos calculando huecos sin ellos y logueamos)
+    bloques_activos: list[dict] = []
+    try:
+        bloques_activos = await bloques.listar_activos_para_calculo(user_id)
+    except Exception as e:
+        import logger
+        logger.warn(
+            "tools", "bloques_fetch_failed",
+            f"No pude leer bloques no negociables: {type(e).__name__}: {e}",
+            user_id=user_id,
+            error=e,
+        )
+
     huecos = _calcular_huecos(
         eventos_bitrix=eventos,
         fecha_desde=fecha_desde,
@@ -544,6 +563,7 @@ async def consultar_huecos_libres(
         incluir_fuera_horario=incluir_fuera_horario,
         ahora=ahora,
         parse_fecha=_parse_bitrix_date,
+        bloques_no_negociables=bloques_activos,
     )
     # Mensaje explicito para el brain cuando no hay huecos: evita que
     # reintente en bucle asumiendo que la llamada fallo.
@@ -559,7 +579,7 @@ async def consultar_huecos_libres(
                 f"ocupado por eventos, ser fuera de horario laboral, o caer "
                 f"en domingo. Informa al usuario directamente. NO vuelvas a "
                 f"llamar esta tool ni consultar_eventos: dile lo que has "
-                f"encontrado y ofrece alternativas si tiene sentido."
+                f"encontrado and ofrece alternativas si tiene sentido."
             ),
         }
 
@@ -616,3 +636,128 @@ async def listar_eventos_preparados(user_id: str) -> dict:
             })
 
     return {"ok": True, "total": len(operaciones), "operaciones": operaciones}
+
+async def gestionar_bloques(
+    user_id: str,
+    accion: str,
+    id: int | None = None,
+    nombre: str | None = None,
+    dias_semana: list[int] | None = None,
+    hora_inicio: str | None = None,
+    hora_fin: str | None = None,
+    descripcion: str = "",
+) -> dict:
+    """Gestiona los BLOQUES NO NEGOCIABLES del usuario.
+
+    Un bloque es una franja horaria recurrente semanal declarada como
+    intocable por el CEO: gimnasio, comida familiar, tiempo estratégico
+    de trabajo profundo, etc. Los bloques ACTIVOS se restan
+    automaticamente de consultar_huecos_libres.
+
+    Semantica intencionada: los bloques bloquean la propuesta de huecos,
+    NO impiden crear eventos en esa franja. Si el CEO pide agendar algo
+    dentro de un bloque, avisale del solape y pide confirmacion explicita
+    antes de meterlo en el buffer con crear_evento.
+
+    Acciones soportadas:
+    - "listar": devuelve todos los bloques activos del usuario. No
+      requiere mas parametros. Usala cuando pregunte "que bloques tengo",
+      "que tengo protegido", "que dias tengo el gym", etc.
+    - "añadir": crea un bloque nuevo. Requiere nombre, dias_semana,
+      hora_inicio, hora_fin. Ej: "bloqueame el gym L-V 07:00-08:00".
+    - "eliminar": borra un bloque. Requiere id. Antes usa "listar"
+      para obtener el id correcto. Ej: "quita el bloque del gym".
+    - "desactivar": pausa un bloque sin borrarlo. Requiere id.
+      Util cuando el CEO quiere saltarse el bloque un tiempo pero no
+      perder la configuracion. Ej: "esta semana no voy al gym, quitalo
+      pero solo temporal".
+
+    Args:
+        accion: una de "listar", "añadir", "eliminar", "desactivar".
+        id: identificador del bloque (obligatorio para eliminar/desactivar).
+        nombre: titulo corto del bloque (obligatorio para añadir).
+            Ej: "Gimnasio", "Comida familiar", "Trabajo profundo".
+        dias_semana: lista de dias en formato ISO (0=lunes, 1=martes,
+            ..., 6=domingo). Ej: [0,1,2,3,4] para L-V.
+        hora_inicio: "HH:MM" en hora local Madrid. Ej: "07:00".
+        hora_fin: "HH:MM" en hora local Madrid. Ej: "08:00".
+        descripcion: contexto adicional opcional. Ej: "gym con Marc".
+    """
+    print(f"TOOL[{user_id}]: gestionar_bloques accion={accion}")
+    import bloques
+
+    accion_norm = (accion or "").strip().lower()
+
+    if accion_norm == "listar":
+        try:
+            bloques_activos = await bloques.listar(user_id, solo_activos=True)
+        except Exception as e:
+            return {"ok": False, "mensaje": f"No pude leer los bloques: {e}"}
+        return {
+            "ok": True,
+            "total": len(bloques_activos),
+            "bloques": bloques_activos,
+        }
+
+    if accion_norm in ("añadir", "anadir", "add", "crear"):
+        # Validacion previa antes de tocar la BD
+        if not nombre or not nombre.strip():
+            return {"ok": False, "mensaje": "Falta el nombre del bloque."}
+        if not dias_semana:
+            return {"ok": False, "mensaje": "Faltan los dias de la semana (0=lunes...6=domingo)."}
+        if not hora_inicio or not hora_fin:
+            return {"ok": False, "mensaje": "Faltan hora_inicio y/o hora_fin (formato HH:MM)."}
+
+        try:
+            creado = await bloques.crear(
+                user_id=user_id,
+                nombre=nombre,
+                dias_semana=dias_semana,
+                hora_inicio=hora_inicio,
+                hora_fin=hora_fin,
+                descripcion=descripcion or "",
+            )
+        except ValueError as e:
+            return {"ok": False, "mensaje": f"Datos invalidos: {e}"}
+        except Exception as e:
+            return {"ok": False, "mensaje": f"Error creando el bloque: {type(e).__name__}: {e}"}
+
+        return {
+            "ok": True,
+            "bloque": creado,
+            "mensaje": (
+                f"Bloque '{creado['nombre']}' creado "
+                f"({creado['hora_inicio']}-{creado['hora_fin']} en dias "
+                f"{creado['dias_semana']})."
+            ),
+        }
+
+    if accion_norm in ("eliminar", "borrar", "delete"):
+        if id is None:
+            return {"ok": False, "mensaje": "Falta el id del bloque. Usa 'listar' antes para obtenerlo."}
+        try:
+            ok = await bloques.eliminar(user_id, int(id))
+        except Exception as e:
+            return {"ok": False, "mensaje": f"Error eliminando: {type(e).__name__}: {e}"}
+        if not ok:
+            return {"ok": False, "mensaje": f"No existe un bloque con id {id} para este usuario."}
+        return {"ok": True, "mensaje": f"Bloque {id} eliminado."}
+
+    if accion_norm in ("desactivar", "pausar", "deactivate"):
+        if id is None:
+            return {"ok": False, "mensaje": "Falta el id del bloque. Usa 'listar' antes para obtenerlo."}
+        try:
+            ok = await bloques.desactivar(user_id, int(id))
+        except Exception as e:
+            return {"ok": False, "mensaje": f"Error desactivando: {type(e).__name__}: {e}"}
+        if not ok:
+            return {"ok": False, "mensaje": f"No existe un bloque con id {id} para este usuario."}
+        return {"ok": True, "mensaje": f"Bloque {id} desactivado (pausado, no borrado)."}
+
+    return {
+        "ok": False,
+        "mensaje": (
+            f"Accion desconocida: '{accion}'. Usa una de: "
+            f"'listar', 'añadir', 'eliminar', 'desactivar'."
+        ),
+    }
