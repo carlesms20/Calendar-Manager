@@ -50,6 +50,9 @@ from tools import (
     listar_eventos_preparados,
     consultar_huecos_libres,
     gestionar_bloques,
+    crear_tarea,
+    consultar_tareas,
+    actualizar_estado_tarea,
 )
 
 load_dotenv()
@@ -77,8 +80,9 @@ _client = AsyncAnthropic(api_key=_API_KEY, max_retries=3)
 
 SYSTEM_PROMPT_ESTABLE = """# IDENTIDAD
 Eres el asistente operativo personal del usuario. Gestionas su agenda 
-(eventos de calendario) desde Telegram, con Bitrix24 como sistema 
-subyacente (sincronizado con Google Calendar y Office).
+(eventos de calendario) y sus tareas (work items del Executive Operating 
+System) desde Telegram, con Bitrix24 como sistema subyacente 
+(sincronizado con Google Calendar y Office).
 
 # ZONA HORARIA E IDIOMA
 - Zona horaria: Europe/Madrid
@@ -102,6 +106,13 @@ Mapeo pregunta → tool:
 - "bloquéame X", "protégeme Y", "reserva tiempo para Z", "qué bloques 
   tengo", "quita el bloque de W" → gestionar_bloques (ver sección más 
   abajo).
+- "qué tareas tengo pendientes", "qué hay en mi to-do", "qué está en 
+  progreso", "qué le he delegado a X", "qué está esperando respuesta" 
+  → consultar_tareas (ver sección TAREAS más abajo).
+- "crea una tarea para X", "recuérdame Y", "añade a mi to-do Z", 
+  "delega esto a W" → crear_tarea.
+- "márcalo como delegado/hecho/cancelado", "esa tarea ya está en 
+  progreso", "cámbiale el estado a W" → actualizar_estado_tarea.
 
 La palabra "pendiente" es ambigua. Si acabamos de preparar eventos y aún 
 no se han confirmado, es el buffer → listar_eventos_preparados. En 
@@ -115,6 +126,23 @@ eventos que no estén en el retorno.
 Si necesitas datos, en ese turno llama SOLO a la tool de datos. En el 
 turno siguiente, con el resultado ya en contexto, usa responder_texto 
 con el mensaje final. Nunca los pongas juntos en la misma respuesta.
+
+# HISTORIAL Y DATOS ACTUALES
+El resumen previo y el historial reciente pueden mencionar problemas, 
+bugs o incidencias del sistema que ya fueron resueltos entre entonces 
+y ahora. Antes de reafirmar o avisar al usuario de un problema técnico 
+que hayas leído en el histórico, verifica con los tool_result del 
+turno actual. Si los datos actuales son coherentes, el problema pasado 
+está cerrado — no lo menciones. Solo alerta de problemas que veas 
+reflejados en los datos actuales, no de memoria.
+
+El valor "[NO DATA]" en un campo de tarea o evento significa que ese 
+campo específico está vacío en Bitrix. NO significa que la 
+sincronización esté rota, ni que el sistema tenga un desfase. Muchas 
+tareas antiguas creadas antes de que el sistema poblara los UF_* del 
+EOS legítimamente vienen con casi todos los campos [NO DATA]. Ver 
+[NO DATA] en varios campos de varias tareas es normal, no es un 
+síntoma de bug.
 
 # FECHAS Y HORAS
 Interpreta las horas SIEMPRE como hora local de Madrid (Europe/Madrid). 
@@ -247,6 +275,122 @@ Para saber si hay solape sin llamar a gestionar_bloques cada turno,
 puedes fiarte de tu contexto de conversación reciente. Si no estás 
 seguro, llama a gestionar_bloques(accion="listar") una vez y trabaja 
 con esa lista.
+
+# TAREAS (work items)
+Las tareas son distintas de los eventos. Un evento es una cita o 
+reunión con hora concreta en el calendario. Una tarea es trabajo 
+pendiente sin hora fija: proyecto, decisión, delegación, seguimiento, 
+riesgo.
+
+Regla de asignación:
+- "reunión con X el martes a las 10", "café con Marc mañana" 
+  → crear_evento.
+- "prepara el informe Q4", "decide si extendemos el contrato con 
+  Vasilena", "que Sandra revise el presupuesto" → crear_tarea.
+- Compromiso con hora concreta → evento. Resultado esperado sin 
+  hora fija → tarea. Cuando dudes, pregunta.
+
+IMPORTANTE — no confundir con eventos: las tareas se crean, modifican 
+y cierran DIRECTAMENTE al llamar a la tool. NO hay buffer de operaciones 
+pendientes ni confirmación intermedia. Ese flujo con confirmar/cancelar 
+es solo para eventos. Si el usuario dice "crea una tarea para X", 
+crear_tarea la crea al instante en Bitrix. Si te equivocas, 
+actualizar_estado_tarea a 'Cancelled' o edición en Bitrix lo arreglan.
+
+Antes de llamar a actualizar_estado_tarea, usa consultar_tareas para 
+localizar el id. Nunca uses ids de memoria.
+
+# ESTADOS DE TAREA (matriz de transiciones)
+Cada tarea tiene exactamente un estado. Los 8 permitidos:
+- New: creada, sin empezar.
+- In Progress: en ejecución activa.
+- Delegated: transferida a otro Owner.
+- Waiting: acción propia hecha, esperando respuesta externa.
+- Blocked: no puede continuar por dependencia.
+- Scheduled: tiempo asignado en calendario para ejecutar.
+- Completed: resultado alcanzado (terminal, no admite salida).
+- Cancelled: detenida formalmente (terminal, no admite salida).
+
+Transiciones legales:
+- New → In Progress | Delegated | Scheduled | Completed | Cancelled.
+- In Progress → Scheduled | Waiting | Blocked | Completed | Cancelled.
+- Delegated → Waiting | Completed | Cancelled.
+- Waiting | Blocked | Scheduled → solo Completed o Cancelled.
+- Completed y Cancelled: terminales, sin salida.
+
+Si el usuario pide una transición ilegal (ej: "desbloquéame la tarea X" 
+cuando Blocked → In Progress no existe), actualizar_estado_tarea 
+devolverá error con el motivo. Explícaselo al usuario en lenguaje 
+natural y ofrécele la ruta legal: normalmente Completed si el bloqueo 
+se resolvió, o Cancelled más crear una nueva tarea si el trabajo cambió 
+de forma.
+
+# CAMPOS AL CREAR TAREAS
+Rellena lo que puedas inferir. Solo pregunta lo indeducible.
+
+- title: obligatorio. Orientado al resultado ("Aprobar menú de 
+  invierno"), no al proceso ("Hablar con José").
+- task_type: infiere. Objetivo multitarea = Project, acción concreta 
+  = Task, decisión pendiente del CEO = Decision, amenaza a monitorizar 
+  = Risk. Si no está claro, déjalo vacío.
+- alexander_role: Execution si lo hace él, Decision si solo decide, 
+  Approval si revisa, Supervision si hace seguimiento, No Involvement 
+  si está 100% delegado.
+- next_action: SIEMPRE concreta y ejecutable. "Llamar a Vasilena para 
+  confirmar horario", NO "Coordinar con Vasilena".
+- expected_result: criterio verificable de cierre. "Contrato firmado 
+  por ambas partes", NO "Cerrar el tema".
+- Si la acción requiere conversar con alguien (decisión, validación, 
+  aprobación, desbloqueo), pon requires_conversation=True y 
+  primary_interlocutor. Si solo hace falta un intercambio asíncrono 
+  (email, mensaje), no la marques como conversación.
+
+# DELEGACIÓN DE TAREAS
+Para delegar en una persona, pasa su nombre en el arg 'owner' de 
+crear_tarea o actualizar_estado_tarea. El sistema resuelve el nombre 
+a un usuario Bitrix real via user.search (busca en nombre, apellido, 
+email y puesto).
+
+Casos:
+- Match único → la tarea se asigna a esa persona en Bitrix (aparecerá 
+  como assignee real, no como texto en next_action).
+- Sin matches → la tool devuelve error legible ("No encontré a 'X'..."). 
+  Pregunta al usuario el nombre completo o el email y vuelve a intentar.
+- Varios matches → la tool devuelve la lista de personas que coinciden. 
+  Preséntala al usuario y pregúntale cuál es. Vuelve a llamar con el 
+  nombre más específico (nombre + apellido, o email).
+
+Al delegar en una misma llamada:
+- crear_tarea(title="...", owner="Sandra", status_eos="Delegated", 
+  expected_result="...", review_date="...", escalation_condition="...").
+- actualizar_estado_tarea(id=..., nuevo_estado="Delegated", 
+  owner="Sandra", expected_result="...", review_date="...", 
+  escalation_condition="...").
+
+Cambiar owner SIN cambiar estado es un caso legítimo (reasignación 
+sin cambio de status): pasa solo el arg owner al actualizar. Cambiar 
+estado a Delegated SIN pasar owner es también válido si el usuario 
+no especifica a quién todavía — en ese caso la tarea queda Delegated 
+formalmente pero sigue asignada al CEO en Bitrix; añade un TODO en 
+next_action tipo "Pendiente: identificar responsable".
+
+# CONSULTAR TAREAS: SOLO ACTIVAS POR DEFECTO
+consultar_tareas por defecto excluye Completed y Cancelled. Esto es lo 
+que quieres para "¿qué tengo pendiente?", "¿qué está en marcha?", "¿qué 
+está esperando respuesta?".
+
+Solo pasa solo_activos=false o estado="Completed" si el usuario pide 
+historial explícito ("qué acabé la semana pasada", "muéstrame las 
+tareas ya cerradas").
+
+Si el retorno marca truncado=true, resume lo que ves y propón un 
+filtro más estrecho ("Tienes muchas activas; ¿quieres verlas por 
+estado, por interlocutor, o por tipo?").
+
+consultar_tareas NO tiene texto_libre como consultar_eventos. Si el 
+usuario pide "busca la tarea que hablaba de X" o "cuál era la de Y", 
+lista todas las activas y filtra tú mentalmente por el título en la 
+lista devuelta. Nunca pases texto_libre a consultar_tareas.
 
 # ESTILO DE RESPUESTA
 - Claro, directivo, sin relleno. Tono de management práctico.
@@ -574,7 +718,325 @@ TOOLS_SCHEMA = [
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "crear_tarea",
+        "description": (
+            "Crea una TAREA (work item) en Bitrix Tasks con los UF_* del "
+            "Executive Operating System. Usa esto para trabajo pendiente sin "
+            "hora fija de ejecucion: proyectos, decisiones, delegaciones, "
+            "seguimientos, riesgos. NO usar para citas o reuniones con hora "
+            "concreta — para eso es crear_evento. "
+            "Solo 'title' es obligatorio. Toda tarea nace en 'New' salvo "
+            "que pases otro status_eos (p.ej. 'Delegated' cuando el CEO "
+            "delega en la misma frase que crea la tarea). "
+            "Ejecucion DIRECTA: no hay buffer de confirmacion como en "
+            "eventos. Si el LLM se equivoca, actualizar_estado_tarea a "
+            "'Cancelled' o edicion en Bitrix lo arregla. "
+            "OWNER: por defecto la tarea queda asignada al CEO (el usuario "
+            "que la crea). Para delegar en otra persona, pasa su nombre "
+            "(o email) en el arg 'owner'. El sistema lo resuelve via "
+            "user.search de Bitrix: si hay 1 match activo se asigna a esa "
+            "persona en Bitrix como Assignee real; si hay 0 matches o "
+            "varios, la tool devuelve error legible y la tarea NO se crea "
+            "(pregunta al usuario y vuelve a llamar)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Titulo corto orientado al resultado, no al proceso. "
+                        "Ej: 'Aprobar menu de invierno', NO 'Hablar con Jose'."
+                    ),
+                },
+                "owner": {
+                    "type": "string",
+                    "description": (
+                        "Nombre de la persona a quien delegar la tarea "
+                        "(RESPONSIBLE_ID en Bitrix). Puedes pasar nombre "
+                        "solo ('Sandra'), nombre + apellido ('Sandra "
+                        "Perez'), o email. Si hay varios matches, la tool "
+                        "devolvera la lista y tendras que preguntar al "
+                        "usuario cual es y volver a llamar con nombre mas "
+                        "especifico o email. Si omites owner, la tarea "
+                        "queda asignada al CEO (comportamiento por defecto)."
+                    ),
+                },
+                "status_eos": {
+                    "type": "string",
+                    "enum": ["New", "In Progress", "Delegated", "Waiting",
+                             "Blocked", "Scheduled", "Completed", "Cancelled"],
+                    "description": "Estado inicial. Default 'New'.",
+                },
+                "task_type": {
+                    "type": "string",
+                    "enum": ["Project", "Task", "Delegated Work", "Waiting",
+                             "Meeting", "Decision", "Risk", "Information"],
+                    "description": (
+                        "Tipo de work item. Project = objetivo multitarea; "
+                        "Task = accion concreta; Decision = punto de decision "
+                        "del CEO; Risk = amenaza a monitorizar; Waiting = "
+                        "esperando respuesta externa; Meeting = reunion "
+                        "planificada; Delegated Work = ejecutado por otro; "
+                        "Information = seguimiento sin accion. Si no esta "
+                        "claro, dejalo vacio."
+                    ),
+                },
+                "alexander_role": {
+                    "type": "string",
+                    "enum": ["Execution", "Decision", "Approval",
+                             "Supervision", "No Involvement"],
+                    "description": (
+                        "Nivel de intervencion del CEO. Execution = ejecuta "
+                        "el; Decision = solo el decide; Approval = revisa y "
+                        "aprueba; Supervision = seguimiento; No Involvement "
+                        "= delegado 100%."
+                    ),
+                },
+                "next_action": {
+                    "type": "string",
+                    "description": (
+                        "Accion siguiente concreta y ejecutable. Ej: 'Llamar "
+                        "a Vasilena para confirmar horario', NO 'Coordinar "
+                        "con Vasilena'."
+                    ),
+                },
+                "expected_result": {
+                    "type": "string",
+                    "description": (
+                        "Criterio verificable de finalizacion. Ej: 'Contrato "
+                        "firmado por ambas partes', NO 'Cerrar el tema'."
+                    ),
+                },
+                "review_date": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601. Fecha de control directivo (cuando el "
+                        "CEO revisa el avance). Recomendado para Delegated "
+                        "y In Progress."
+                    ),
+                },
+                "source": {
+                    "type": "string",
+                    "description": (
+                        "Origen de la tarea. Default 'Bitrix24'. Otros "
+                        "utiles: 'Reunion con X', 'Email de Y', "
+                        "'Iniciativa CEO'."
+                    ),
+                },
+                "risk": {
+                    "type": "string",
+                    "description": (
+                        "Consecuencia de la inaccion. Ej: 'Perdemos "
+                        "ventana de aprobacion regulatoria', NO 'Es urgente'."
+                    ),
+                },
+                "escalation_condition": {
+                    "type": "string",
+                    "description": (
+                        "Condicion que exige intervencion del CEO. Ej: "
+                        "'Si no hay respuesta en 48h', 'Si el precio supera "
+                        "10K'. Obligatorio conceptualmente para Delegated."
+                    ),
+                },
+                "requires_conversation": {
+                    "type": "boolean",
+                    "description": (
+                        "True si el next_action NO puede ejecutarse sin "
+                        "conversar con alguien (decision, validacion, "
+                        "aprobacion, desbloqueo)."
+                    ),
+                },
+                "primary_interlocutor": {
+                    "type": "string",
+                    "description": (
+                        "Persona principal para la conversacion. Solo una. "
+                        "Obligatorio si requires_conversation=True."
+                    ),
+                },
+                "conversation_purpose": {
+                    "type": "string",
+                    "description": (
+                        "Resultado esperado de la conversacion. NO puede "
+                        "ser 'hablar de X' — debe ser 'aprobar X', "
+                        "'decidir Y', 'validar Z'."
+                    ),
+                },
+                "expected_decision": {
+                    "type": "string",
+                    "description": (
+                        "Decision, validacion o acuerdo concreto esperado "
+                        "de la conversacion."
+                    ),
+                },
+                "meeting_candidate": {
+                    "type": "boolean",
+                    "description": (
+                        "True si esta tarea puede agruparse en una reunion "
+                        "con otras del mismo primary_interlocutor. Deja "
+                        "vacio y el sistema lo calculara en un sprint futuro."
+                    ),
+                },
+                "related_meeting_id": {
+                    "type": "string",
+                    "description": (
+                        "ID de reunion ejecutiva vinculada, si esta tarea "
+                        "salio de o se resuelve en una reunion concreta."
+                    ),
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "consultar_tareas",
+        "description": (
+            "Lista las TAREAS del CEO en Bitrix Tasks con todos los UF_* del "
+            "EOS materializados. Distinta de consultar_eventos: eso es "
+            "calendario (citas con hora), esto es work items sin hora fija. "
+            "Por defecto devuelve solo tareas ACTIVAS (excluye Completed y "
+            "Cancelled), que es lo comun para '¿que tengo pendiente?'. Si "
+            "el CEO pide historico, pasa solo_activos=false o filtra por "
+            "estado='Completed'. "
+            "Los filtros son AND: pasar estado='Waiting' y task_type='Task' "
+            "devuelve tareas Waiting de tipo Task exclusivamente. "
+            "Si el retorno marca truncado=true, propon al usuario un "
+            "filtro mas estrecho. "
+            "IMPORTANTE — no acepta texto_libre ni busqueda por palabra. "
+            "Los unicos filtros son estado, task_type, primary_interlocutor, "
+            "solo_activos y limite. Si el usuario pide 'busca la tarea que "
+            "hablaba de X', lista todas activas y filtra tu por el titulo "
+            "en la respuesta."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "estado": {
+                    "type": "string",
+                    "enum": ["New", "In Progress", "Delegated", "Waiting",
+                             "Blocked", "Scheduled", "Completed", "Cancelled"],
+                    "description": (
+                        "Filtro por status_eos. Si lo pasas, sobreescribe "
+                        "solo_activos. Ej: 'Waiting' para ver que espera "
+                        "respuesta externa."
+                    ),
+                },
+                "task_type": {
+                    "type": "string",
+                    "enum": ["Project", "Task", "Delegated Work", "Waiting",
+                             "Meeting", "Decision", "Risk", "Information"],
+                    "description": "Filtro por tipo de work item.",
+                },
+                "primary_interlocutor": {
+                    "type": "string",
+                    "description": (
+                        "Match exacto case-insensitive por nombre. Util "
+                        "para 'que tengo con Vasilena', 'todo lo de Sandra'."
+                    ),
+                },
+                "solo_activos": {
+                    "type": "boolean",
+                    "description": (
+                        "Default true. Excluye Completed y Cancelled. "
+                        "Ponlo false si el usuario pide historico."
+                    ),
+                },
+                "limite": {
+                    "type": "integer",
+                    "description": (
+                        "Cap de tareas devueltas. Default 50. Si hay mas, "
+                        "el retorno marca truncado=true."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "actualizar_estado_tarea",
+        "description": (
+            "Cambia el status_eos de una tarea y, en la misma llamada, "
+            "actualiza campos asociados y opcionalmente el owner. La "
+            "transicion se valida contra la matriz de estados EOS: si "
+            "intentas una ilegal (p.ej. 'Waiting' -> 'New', o 'Completed' "
+            "-> 'In Progress'), la tool devuelve error con el motivo y "
+            "NO toca Bitrix. "
+            "Antes de llamar, usa consultar_tareas para localizar el id — "
+            "nunca uses ids de memoria. "
+            "Transiciones legales resumidas: New -> In Progress | Delegated "
+            "| Scheduled; In Progress -> Scheduled | Waiting | Blocked; "
+            "Delegated -> Waiting; cualquier estado activo -> Completed o "
+            "Cancelled; Completed y Cancelled son terminales (nada saliente). "
+            "OWNER: para reasignar la tarea a otra persona en el mismo "
+            "update, pasa su nombre en 'owner'. Se resuelve via user.search "
+            "de Bitrix igual que en crear_tarea (1 match asigna, 0 o N "
+            "devuelve error legible). Cambiar owner NO implica pasar a "
+            "'Delegated' automaticamente: si delegas, pon nuevo_estado="
+            "'Delegated' Y owner en la misma llamada. Cambiar solo owner "
+            "sin tocar estado es un caso legitimo (reasignacion pura)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": (
+                        "ID Bitrix de la tarea. Obtenlo con consultar_tareas."
+                    ),
+                },
+                "nuevo_estado": {
+                    "type": "string",
+                    "enum": ["New", "In Progress", "Delegated", "Waiting",
+                             "Blocked", "Scheduled", "Completed", "Cancelled"],
+                    "description": "Estado destino.",
+                },
+                "owner": {
+                    "type": "string",
+                    "description": (
+                        "Nombre del nuevo responsable (reasignacion). Misma "
+                        "resolucion que en crear_tarea: por nombre o email, "
+                        "via user.search. Si omites owner, RESPONSIBLE_ID "
+                        "queda como estaba. Cambiar owner no implica cambiar "
+                        "el estado: si delegas, pasa nuevo_estado='Delegated' "
+                        "Y owner en la misma llamada."
+                    ),
+                },
+                "next_action": {
+                    "type": "string",
+                    "description": (
+                        "Update de UF_NEXT_ACTION. Obligatorio "
+                        "conceptualmente al pasar a 'In Progress'."
+                    ),
+                },
+                "expected_result": {
+                    "type": "string",
+                    "description": (
+                        "Update de UF_EXPECTED_RESULT. Obligatorio "
+                        "conceptualmente para 'Delegated'."
+                    ),
+                },
+                "review_date": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601. Update de UF_REVIEW_DATE. Obligatorio "
+                        "conceptualmente para 'In Progress' y 'Delegated'."
+                    ),
+                },
+                "escalation_condition": {
+                    "type": "string",
+                    "description": (
+                        "Update de UF_ESCALATION_CONDITION. Obligatorio "
+                        "conceptualmente para 'Delegated'."
+                    ),
+                },
+            },
+            "required": ["id", "nuevo_estado"],
+        },
+    },
 ]
+
+# Cache breakpoint en la ultima tool: cachea todo el bloque tools.
+TOOLS_SCHEMA[-1]["cache_control"] = {"type": "ephemeral"}
 
 # Cache breakpoint en la ultima tool: cachea todo el bloque tools.
 TOOLS_SCHEMA[-1]["cache_control"] = {"type": "ephemeral"}
@@ -593,6 +1055,9 @@ _TOOLS_ASYNC = {
     "consultar_huecos_libres": consultar_huecos_libres,
     "listar_eventos_preparados": listar_eventos_preparados,
     "gestionar_bloques": gestionar_bloques,
+    "crear_tarea": crear_tarea,
+    "consultar_tareas": consultar_tareas,
+    "actualizar_estado_tarea": actualizar_estado_tarea,
 }
 
 
@@ -833,38 +1298,51 @@ async def summarize(user_id: str, history: list, resumen_previo: str = "") -> st
 
     prompt = f"""Eres un asistente de resumen acumulativo de una conversación en curso.
 
-Recibes:
-1. Un resumen previo (puede estar vacío si es la primera vez).
-2. Nuevos mensajes a añadir al resumen.
+    Recibes:
+    1. Un resumen previo (puede estar vacío si es la primera vez).
+    2. Nuevos mensajes a añadir al resumen.
 
-Tu tarea: fusionar ambos en un resumen único, actualizado y coherente.
+    Tu tarea: fusionar ambos en un resumen único, actualizado y coherente.
 
-Conserva:
-- Datos personales, nombres, fechas concretas.
-- Decisiones tomadas y confirmadas.
-- Preferencias del usuario detectadas.
-- Tareas mencionadas y su estado.
-- Contexto necesario para continuar la conversación.
+    Conserva:
+    - Datos personales, nombres, fechas concretas.
+    - Decisiones tomadas y confirmadas.
+    - Preferencias del usuario detectadas.
+    - Tareas y eventos activos y su estado ACTUAL.
+    - Contexto necesario para continuar la conversación.
 
-Descarta: saludos, small talk, repeticiones, aclaraciones resueltas.
+    Descarta:
+    - Saludos, small talk, repeticiones, aclaraciones resueltas.
+    - Problemas técnicos, bugs o incidencias YA RESUELTOS. Si el resumen 
+    previo mencionaba "el sistema tiene el bug X" y en los nuevos 
+    mensajes se ve que X fue arreglado o ya no aplica, elimina esa 
+    mención por completo del nuevo resumen. No la conviertas en "antes 
+    había un bug X, ya resuelto" — simplemente sácala.
+    - Estados de tareas/eventos que ya no son actuales. Si el resumen 
+    previo decía "tarea 123 está en In Progress" y los nuevos mensajes 
+    muestran que pasó a Completed, refleja SOLO el estado actual 
+    (Completed), no la transición completa.
 
-Máximo 300 palabras. NO uses markdown. Responde SOLO con el resumen actualizado.
+    Regla de oro: el resumen es una foto del ESTADO ACTUAL, no un log 
+    histórico. Prefiere borrar información obsoleta antes que acumularla.
 
----
+    Máximo 300 palabras. NO uses markdown. Responde SOLO con el resumen actualizado.
 
-RESUMEN PREVIO:
-{resumen_previo if resumen_previo else "(vacío, primera iteración)"}
+    ---
 
----
+    RESUMEN PREVIO:
+    {resumen_previo if resumen_previo else "(vacío, primera iteración)"}
 
-NUEVOS MENSAJES:
-{conversacion}"""
+    ---
+
+    NUEVOS MENSAJES:
+    {conversacion}"""
 
     response = await _client.messages.create(
-        model=MODELO,
-        max_tokens=MAX_TOKENS_SUMMARY,
-        messages=[{"role": "user", "content": prompt}],
-    )
+            model=MODELO,
+            max_tokens=MAX_TOKENS_SUMMARY,
+            messages=[{"role": "user", "content": prompt}],
+        )
     await usage.registrar(user_id, response.usage, MODELO, contexto="summary")
 
     # response.content es lista de bloques; sin tools esperamos un solo

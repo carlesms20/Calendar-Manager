@@ -57,6 +57,46 @@ def _contexto_bitrix(user_id: str) -> tuple[str, int]:
         raise ValueError(f"Usuario '{user_id}' sin contexto Bitrix configurado.")
     return webhook, bitrix_uid
 
+async def _resolver_owner(webhook: str, owner_str: str) -> tuple[int | None, str | None]:
+    """Resuelve un nombre de owner a bitrix_user_id via user.search.
+
+    Devuelve (user_id, mensaje_error). Exactamente uno de los dos es
+    None:
+    - Si hay 1 match activo -> (user_id, None).
+    - Si hay 0 matches      -> (None, mensaje legible para el LLM).
+    - Si hay N > 1 matches  -> (None, mensaje con la lista de opciones
+      para que el LLM pida clarificacion al usuario).
+
+    El caller usa el mensaje tal cual en su return {"ok": False, ...}
+    y el LLM lo re-emite al usuario. La estrategia es 'fail loud':
+    nunca resolver ambiguedades por nuestra cuenta ni caer al usuario
+    actual si no se encuentra.
+    """
+    from bitrix import buscar_usuarios
+    matches = await buscar_usuarios(webhook, owner_str)
+    if not matches:
+        return None, (
+            f"No encontré a '{owner_str}' en Bitrix. Comprueba el nombre "
+            f"con el usuario o pídele el email/apellido para volver a probar."
+        )
+    if len(matches) == 1:
+        return matches[0]["id"], None
+    # Multiples matches -> lista para que el LLM pregunte cual
+    lineas = []
+    for m in matches[:8]:  # cap por si acaso
+        extras = []
+        if m["work_position"]:
+            extras.append(m["work_position"])
+        if m["email"]:
+            extras.append(m["email"])
+        sufijo = f" ({', '.join(extras)})" if extras else ""
+        lineas.append(f"- {m['nombre_completo']}{sufijo} [id {m['id']}]")
+    return None, (
+        f"Hay {len(matches)} personas que coinciden con '{owner_str}':\n"
+        + "\n".join(lineas)
+        + "\n\nPregunta al usuario cuál es y vuelve a llamar con el nombre "
+        f"más específico o el id exacto."
+    )
 
 # --- Tool terminal ---
 
@@ -759,5 +799,357 @@ async def gestionar_bloques(
         "mensaje": (
             f"Accion desconocida: '{accion}'. Usa una de: "
             f"'listar', 'añadir', 'eliminar', 'desactivar'."
+        ),
+    }
+
+async def crear_tarea(
+    user_id: str,
+    title: str,
+    owner: str | None = None,
+    status_eos: str | None = None,
+    task_type: str | None = None,
+    alexander_role: str | None = None,
+    next_action: str | None = None,
+    expected_result: str | None = None,
+    review_date: datetime | None = None,
+    source: str | None = "Bitrix24",
+    risk: str | None = None,
+    escalation_condition: str | None = None,
+    requires_conversation: bool | None = None,
+    primary_interlocutor: str | None = None,
+    conversation_purpose: str | None = None,
+    expected_decision: str | None = None,
+    meeting_candidate: bool | None = None,
+    related_meeting_id: str | None = None,
+) -> dict:
+    """Crea una tarea nueva en Bitrix (tasks) con los UF_* del EOS.
+
+    Ejecucion DIRECTA (no buffer): la tarea se crea inmediatamente en
+    Bitrix. Si el usuario cambia de opinion, actualizar_estado_tarea a
+    'Cancelled' o edicion en Bitrix son mecanismos suficientes.
+
+    Solo 'title' es obligatorio. Toda tarea nace con status_eos='New'
+    salvo que se pase explicitamente otro.
+
+    Owner:
+    - Si owner=None (default) -> RESPONSIBLE_ID = el usuario que crea
+      (el CEO habitualmente).
+    - Si owner=str -> resuelve via user.search por FIND fulltext.
+      - 1 match activo    -> se asigna a esa persona.
+      - 0 matches         -> devuelve error legible, tarea NO se crea.
+      - N > 1 matches     -> devuelve la lista al LLM para que
+        pregunte al usuario cual es. Tarea NO se crea.
+      Nunca cae silenciosamente al usuario actual: fail loud.
+    """
+    print(f"TOOL[{user_id}]: crear_tarea title={title!r} owner={owner!r}")
+
+    try:
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    from models import Tarea, EstadoEOS, TipoTarea, RolAlexander
+    from bitrix_tasks import crear_tarea as crear_tarea_bitrix
+
+    # --- Resolver owner ---
+    responsable_id = bitrix_uid  # default: yo mismo
+    if owner is not None and owner.strip():
+        resuelto, error_msg = await _resolver_owner(webhook, owner)
+        if error_msg:
+            return {"ok": False, "mensaje": error_msg}
+        responsable_id = resuelto
+
+    # --- Coercion de fecha ---
+    if isinstance(review_date, str):
+        try:
+            review_date = datetime.fromisoformat(review_date)
+        except ValueError:
+            return {"ok": False, "mensaje": f"review_date invalida: '{review_date}'."}
+
+    # --- Validacion de enums ---
+    try:
+        estado_inicial = EstadoEOS(status_eos) if status_eos else EstadoEOS.NEW
+    except ValueError:
+        return {"ok": False, "mensaje": (
+            f"status_eos invalido: '{status_eos}'. Debe ser uno de: "
+            f"{', '.join(e.value for e in EstadoEOS)}.")}
+    try:
+        type_enum = TipoTarea(task_type) if task_type else None
+    except ValueError:
+        return {"ok": False, "mensaje": (
+            f"task_type invalido: '{task_type}'. Debe ser uno de: "
+            f"{', '.join(t.value for t in TipoTarea)}.")}
+    try:
+        role_enum = RolAlexander(alexander_role) if alexander_role else None
+    except ValueError:
+        return {"ok": False, "mensaje": (
+            f"alexander_role invalido: '{alexander_role}'. Debe ser uno de: "
+            f"{', '.join(r.value for r in RolAlexander)}.")}
+
+    try:
+        tarea = Tarea(
+            title=title.strip(),
+            status_eos=estado_inicial,
+            task_type=type_enum,
+            alexander_role=role_enum,
+            next_action=next_action or None,
+            expected_result=expected_result or None,
+            review_date=review_date,
+            source=source or None,
+            risk=risk or None,
+            escalation_condition=escalation_condition or None,
+            requires_conversation=requires_conversation,
+            primary_interlocutor=primary_interlocutor or None,
+            conversation_purpose=conversation_purpose or None,
+            expected_decision=expected_decision or None,
+            meeting_candidate=meeting_candidate,
+            related_meeting_id=related_meeting_id or None,
+        )
+    except Exception as e:
+        return {"ok": False, "mensaje": f"No pude preparar la tarea: {e}"}
+
+    try:
+        task_id = await crear_tarea_bitrix(webhook, responsable_id, tarea)
+    except Exception as e:
+        return {"ok": False,
+                "mensaje": f"Error creando la tarea en Bitrix: {type(e).__name__}: {e}"}
+
+    tarea.id = task_id
+    delegada = responsable_id != bitrix_uid
+    print(f"TOOL[{user_id}]: crear_tarea creada id={task_id} "
+          f"estado={estado_inicial.value} responsable={responsable_id} "
+          f"delegada={delegada}")
+
+    return {
+        "ok": True,
+        "id": task_id,
+        "responsable_id": responsable_id,
+        "delegada": delegada,
+        "mensaje": (
+            f"Tarea creada (id={task_id}, estado '{estado_inicial.value}'"
+            + (f", asignada a user_id {responsable_id}" if delegada else "")
+            + ")."
+        ),
+        "tarea": tarea.to_llm_dict(),
+    }
+
+async def consultar_tareas(
+    user_id: str,
+    estado: str | None = None,
+    task_type: str | None = None,
+    primary_interlocutor: str | None = None,
+    solo_activos: bool = True,
+    limite: int = 50,
+) -> dict:
+    """Lista las tareas del usuario en Bitrix con los UF_* del EOS
+    materializados.
+
+    Por defecto devuelve solo tareas activas (excluye Completed y
+    Cancelled), que es lo que el LLM necesita para responder "¿que
+    tengo pendiente?". Si el CEO pide historico, pasa solo_activos=False
+    o filtra por estado='Completed'.
+
+    Los filtros son AND: pasar estado='Waiting' y task_type='Task'
+    devuelve tareas Waiting de tipo Task exclusivamente.
+
+    Args:
+        estado: uno de los 8 estados EOS. Sobreescribe solo_activos.
+        task_type: uno de los 8 tipos del work item model.
+        primary_interlocutor: match exacto (case-insensitive) por nombre.
+        solo_activos: default True. Excluye Completed/Cancelled.
+            Ignorado si 'estado' esta puesto.
+        limite: cap de tareas devueltas (default 50). Si hay mas,
+            trunca y avisa via 'truncado'=True para que el LLM
+            proponga un filtro mas estrecho.
+    """
+    print(f"TOOL[{user_id}]: consultar_tareas estado={estado!r} type={task_type!r} "
+          f"interlocutor={primary_interlocutor!r} activos={solo_activos}")
+
+    try:
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    from models import EstadoEOS, TipoTarea
+    from bitrix_tasks import listar_tareas
+
+    # Validacion de enums (no toca red si el LLM inventa un valor)
+    estado_filter = None
+    if estado:
+        try:
+            estado_filter = EstadoEOS(estado)
+        except ValueError:
+            return {
+                "ok": False,
+                "mensaje": (f"estado invalido: '{estado}'. Debe ser uno de: "
+                            f"{', '.join(e.value for e in EstadoEOS)}."),
+            }
+    type_filter = None
+    if task_type:
+        try:
+            type_filter = TipoTarea(task_type)
+        except ValueError:
+            return {
+                "ok": False,
+                "mensaje": (f"task_type invalido: '{task_type}'. Debe ser uno de: "
+                            f"{', '.join(t.value for t in TipoTarea)}."),
+            }
+
+    # Filtro en Bitrix: solo tareas del usuario. Los filtros UF_ se
+    # aplican client-side porque Bitrix no documenta filtering sobre
+    # UF_* arbitrarios en tasks.task.list.
+    filtro = {"RESPONSIBLE_ID": bitrix_uid}
+
+    try:
+        tareas = await listar_tareas(webhook, filtro=filtro)
+    except Exception as e:
+        return {"ok": False,
+                "mensaje": f"Error consultando Bitrix: {type(e).__name__}: {e}"}
+
+    # Filtros client-side
+    if estado_filter is not None:
+        tareas = [t for t in tareas if t.status_eos == estado_filter]
+    elif solo_activos:
+        terminales = {EstadoEOS.COMPLETED, EstadoEOS.CANCELLED}
+        # Incluye tareas sin status_eos (pre-existentes) como "activas"
+        tareas = [t for t in tareas if t.status_eos not in terminales]
+
+    if type_filter is not None:
+        tareas = [t for t in tareas if t.task_type == type_filter]
+
+    if primary_interlocutor:
+        needle = primary_interlocutor.strip().lower()
+        tareas = [
+            t for t in tareas
+            if t.primary_interlocutor and t.primary_interlocutor.strip().lower() == needle
+        ]
+
+    total_disponibles = len(tareas)
+    tareas = tareas[:limite]
+
+    print(f"TOOL[{user_id}]: consultar_tareas devuelve {len(tareas)} "
+          f"(disponibles {total_disponibles})")
+
+    return {
+        "ok": True,
+        "total_devueltas": len(tareas),
+        "total_disponibles": total_disponibles,
+        "truncado": total_disponibles > limite,
+        "tareas": [t.to_llm_dict() for t in tareas],
+    }
+
+async def actualizar_estado_tarea(
+    user_id: str,
+    id: int,
+    nuevo_estado: str,
+    owner: str | None = None,
+    next_action: str | None = None,
+    expected_result: str | None = None,
+    review_date: datetime | None = None,
+    escalation_condition: str | None = None,
+) -> dict:
+    """Cambia el status_eos de una tarea y, en la misma llamada,
+    actualiza campos asociados y opcionalmente el owner.
+
+    La transicion se valida contra la matriz §6.4. Si es ilegal, la
+    tool devuelve error con el motivo y NO toca Bitrix.
+
+    Owner:
+    - Si owner=None -> no se toca RESPONSIBLE_ID (queda como estaba).
+    - Si owner=str  -> se resuelve via user.search (misma logica que
+      crear_tarea). Fallo loud si 0 o N matches.
+
+    IMPORTANTE: cambiar owner NO implica automaticamente pasar a
+    'Delegated'. Si el usuario dice "delega esto a Sandra", el LLM
+    debe pasar nuevo_estado='Delegated' Y owner='Sandra' en la misma
+    llamada. Cambiar solo owner deja la tarea en su estado actual con
+    otro responsable, lo cual es un caso legitimo (reasignacion).
+    """
+    print(f"TOOL[{user_id}]: actualizar_estado_tarea id={id} -> {nuevo_estado} "
+          f"owner={owner!r}")
+
+    try:
+        webhook, _ = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    from models import EstadoEOS, TransicionIlegal
+    from bitrix_tasks import obtener_tarea, actualizar_tarea
+
+    try:
+        estado_enum = EstadoEOS(nuevo_estado)
+    except ValueError:
+        return {"ok": False, "mensaje": (
+            f"nuevo_estado invalido: '{nuevo_estado}'. Debe ser uno de: "
+            f"{', '.join(e.value for e in EstadoEOS)}.")}
+
+    if isinstance(review_date, str):
+        try:
+            review_date = datetime.fromisoformat(review_date)
+        except ValueError:
+            return {"ok": False, "mensaje": f"review_date invalida: '{review_date}'."}
+
+    # --- Resolver owner si viene ---
+    nuevo_responsable_id: int | None = None
+    if owner is not None and owner.strip():
+        resuelto, error_msg = await _resolver_owner(webhook, owner)
+        if error_msg:
+            return {"ok": False, "mensaje": error_msg}
+        nuevo_responsable_id = resuelto
+
+    # --- Fetch estado actual (para validar transicion) ---
+    try:
+        tarea = await obtener_tarea(webhook, int(id))
+    except Exception as e:
+        return {"ok": False,
+                "mensaje": f"No pude leer la tarea {id}: {type(e).__name__}: {e}"}
+
+    try:
+        tarea.validar_transicion_a(estado_enum)
+    except TransicionIlegal as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    # --- Construir cambios ---
+    cambios: dict = {"status_eos": estado_enum}
+    if next_action is not None:
+        cambios["next_action"] = next_action
+    if expected_result is not None:
+        cambios["expected_result"] = expected_result
+    if review_date is not None:
+        cambios["review_date"] = review_date
+    if escalation_condition is not None:
+        cambios["escalation_condition"] = escalation_condition
+
+    # --- Update en Bitrix (con RESPONSIBLE_ID aparte si aplica) ---
+    try:
+        await actualizar_tarea(
+            webhook, int(id), cambios,
+            responsable_id=nuevo_responsable_id,
+        )
+    except Exception as e:
+        return {"ok": False,
+                "mensaje": f"Error actualizando en Bitrix: {type(e).__name__}: {e}"}
+
+    estado_ant = tarea.status_eos.value if tarea.status_eos else "[NO DATA]"
+    campos_ext = [k for k in cambios if k != "status_eos"]
+    if nuevo_responsable_id is not None:
+        campos_ext.append("responsable_id")
+    print(f"TOOL[{user_id}]: actualizar_estado_tarea OK id={id} "
+          f"{estado_ant} -> {estado_enum.value} campos_extra={campos_ext}")
+
+    return {
+        "ok": True,
+        "id": int(id),
+        "estado_anterior": estado_ant,
+        "estado_nuevo": estado_enum.value,
+        "campos_actualizados": list(cambios.keys()) + (
+            ["responsable_id"] if nuevo_responsable_id is not None else []
+        ),
+        "responsable_id": nuevo_responsable_id,
+        "mensaje": (
+            f"Tarea {id} actualizada. {estado_ant} -> {estado_enum.value}"
+            + (f", asignada a user_id {nuevo_responsable_id}"
+               if nuevo_responsable_id is not None else "")
+            + "."
         ),
     }

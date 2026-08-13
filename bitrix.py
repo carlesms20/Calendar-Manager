@@ -414,3 +414,45 @@ async def eliminar_evento_bitrix(webhook: str, bitrix_user_id: int, id: int) -> 
         id: id Bitrix del evento a borrar.
     """
     await solicitud(webhook, "calendar.event.delete", {"id": id})
+
+async def buscar_usuarios(webhook: str, nombre: str) -> list[dict]:
+    """Busca usuarios Bitrix por nombre/apellido/email/puesto via
+    user.search con filtro FIND (fulltext).
+
+    Devuelve lista de dicts simplificada:
+        [{"id": int, "nombre_completo": str, "email": str,
+          "work_position": str}, ...]
+
+    Solo incluye usuarios ACTIVE=True (ex-empleados no cuentan). Si no
+    hay ningun match, devuelve lista vacia (no lanza). El caller decide
+    como manejar 0/1/N matches.
+
+    FIND busca en NAME + LAST_NAME + SECOND_NAME + EMAIL + WORK_POSITION,
+    fulltext + fallback a LIKE. Acepta "Sandra", "Sandra Perez",
+    "sperez@syncrosfera.eu", "S. Perez".
+    """
+    if not nombre or not nombre.strip():
+        return []
+    resultado = await solicitud(webhook, "user.search", {"FIND": nombre.strip()})
+    if not isinstance(resultado, list):
+        return []
+
+    salida: list[dict] = []
+    for u in resultado:
+        if not isinstance(u, dict):
+            continue
+        if not u.get("ACTIVE"):
+            continue
+        nombre_partes = [u.get("NAME", ""), u.get("LAST_NAME", "")]
+        nombre_completo = " ".join(p for p in nombre_partes if p).strip()
+        try:
+            uid = int(u.get("ID"))
+        except (TypeError, ValueError):
+            continue
+        salida.append({
+            "id": uid,
+            "nombre_completo": nombre_completo or f"user_{uid}",
+            "email": u.get("EMAIL") or "",
+            "work_position": u.get("WORK_POSITION") or "",
+        })
+    return salida
