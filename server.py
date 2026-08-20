@@ -31,6 +31,8 @@ import usage
 import logger
 from bitrix import BitrixError, consultar_ocupacion_bitrix
 from config_usuarios import USUARIOS_POR_USERNAME, autenticar_web, USUARIOS_POR_TELEGRAM_ID
+import bitrix_tasks
+from models import EstadoEOS, TransicionIlegal
 
 load_dotenv()
 
@@ -59,6 +61,7 @@ _RUTAS_PROTEGIDAS_PREFIJOS = (
     "/api/mensaje",
     "/api/audio",
     "/api/eventos",
+    "/api/tareas",
 )
 
 
@@ -162,6 +165,55 @@ class EventoResumen(BaseModel):
 
 class ListaEventos(BaseModel):
     eventos: list[EventoResumen]
+
+class TareaResumen(BaseModel):
+    """Tarea del EOS serializada para el frontend.
+
+    Refleja Tarea.to_llm_dict() de models.py pero sin la sentinela textual
+    [NO DATA]: en el JSON del API preferimos null para que el frontend haga
+    los checks con `if (tarea.field)` de forma idiomatica. La sentinela
+    solo tiene sentido dentro del contexto del LLM.
+    """
+    id: int
+    title: str
+    status_eos: str | None = None
+    task_type: str | None = None
+    alexander_role: str | None = None
+    next_action: str | None = None
+    expected_result: str | None = None
+    review_date: str | None = None
+    source: str | None = None
+    risk: str | None = None
+    escalation_condition: str | None = None
+    requires_conversation: bool | None = None
+    primary_interlocutor: str | None = None
+    conversation_purpose: str | None = None
+    expected_decision: str | None = None
+    meeting_candidate: bool | None = None
+    related_meeting_id: str | None = None
+
+
+class ListaTareas(BaseModel):
+    tareas: list[TareaResumen]
+    total_disponibles: int
+    truncado: bool = False
+
+
+class CambioEstadoTarea(BaseModel):
+    """Payload para PATCH /api/tareas/{id}/estado.
+
+    Los campos opcionales acompañan al cambio de estado: p.ej. delegar
+    exige owner + expected_result + review_date + escalation_condition.
+    El frontend los pasa juntos y el backend los aplica todos en una
+    llamada Bitrix (misma semantica que la tool actualizar_estado_tarea
+    del agente, pero saltandose el LLM porque es accion directa).
+    """
+    nuevo_estado: str
+    owner: str | None = None
+    next_action: str | None = None
+    expected_result: str | None = None
+    review_date: str | None = None
+    escalation_condition: str | None = None
 
 
 # ---- Root redirect ---------------------------------------------------------
@@ -510,6 +562,205 @@ async def obtener_uso(
             error=e,
         )
         raise HTTPException(status_code=500, detail="Error consultando uso")
+
+def _tarea_a_resumen(t) -> TareaResumen:
+    """Convierte models.Tarea -> TareaResumen. Los None se conservan
+    como None en el JSON (no como '[NO DATA]', que es solo para el LLM).
+    """
+    return TareaResumen(
+        id=t.id or 0,
+        title=t.title,
+        status_eos=t.status_eos.value if t.status_eos else None,
+        task_type=t.task_type.value if t.task_type else None,
+        alexander_role=t.alexander_role.value if t.alexander_role else None,
+        next_action=t.next_action,
+        expected_result=t.expected_result,
+        review_date=t.review_date.isoformat() if t.review_date else None,
+        source=t.source,
+        risk=t.risk,
+        escalation_condition=t.escalation_condition,
+        requires_conversation=t.requires_conversation,
+        primary_interlocutor=t.primary_interlocutor,
+        conversation_purpose=t.conversation_purpose,
+        expected_decision=t.expected_decision,
+        meeting_candidate=t.meeting_candidate,
+        related_meeting_id=t.related_meeting_id,
+    )
+
+
+@app.get("/api/tareas", response_model=ListaTareas)
+async def listar_tareas_endpoint(
+    request: Request,
+    estado: str | None = Query(None, description="Filtro EOS. Vacio: solo activas."),
+    task_type: str | None = Query(None),
+    primary_interlocutor: str | None = Query(None, description="Match exacto case-insensitive."),
+    solo_activos: bool = Query(True, description="Excluye Completed/Cancelled. Ignorado si estado esta puesto."),
+    limite: int = Query(100, ge=1, le=500),
+):
+    """Lista tareas del usuario autenticado con filtros opcionales.
+
+    Va DIRECTO a bitrix_tasks.listar_tareas sin pasar por el agente:
+    es una lectura, no hace falta LLM. Sprint 2 dejo el backend Tareas
+    listo, este endpoint es la ventana HTTP para el frontend.
+
+    Requiere Basic Auth (esta ruta protegida por el middleware).
+    """
+    user_id = _user_id_de(request)
+    usuario = USUARIOS_POR_USERNAME.get(user_id)
+    if usuario is None or not usuario.get("webhook_bitrix") or not usuario.get("bitrix_user_id"):
+        raise HTTPException(status_code=500, detail=f"Usuario '{user_id}' sin contexto Bitrix configurado.")
+
+    webhook = usuario["webhook_bitrix"]
+    bitrix_uid = usuario["bitrix_user_id"]
+
+    # Validacion de enum si viene
+    estado_filter: EstadoEOS | None = None
+    if estado:
+        try:
+            estado_filter = EstadoEOS(estado)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"estado invalido: '{estado}'. Debe ser uno de: "
+                       f"{', '.join(e.value for e in EstadoEOS)}",
+            )
+
+    try:
+        tareas = await bitrix_tasks.listar_tareas(
+            webhook,
+            filtro={"RESPONSIBLE_ID": bitrix_uid},
+        )
+    except Exception as e:
+        logger.error(
+            "server", "tareas_query_error",
+            f"Error listando tareas: {type(e).__name__}: {e}",
+            user_id=user_id,
+            error=e,
+        )
+        raise HTTPException(status_code=502, detail=f"Bitrix rechazo la lectura: {e}")
+
+    # Filtros client-side (Bitrix no filtra UF_* arbitrarios en tasks.task.list)
+    if estado_filter is not None:
+        tareas = [t for t in tareas if t.status_eos == estado_filter]
+    elif solo_activos:
+        terminales = {EstadoEOS.COMPLETED, EstadoEOS.CANCELLED}
+        tareas = [t for t in tareas if t.status_eos not in terminales]
+
+    if task_type:
+        tareas = [t for t in tareas if t.task_type and t.task_type.value == task_type]
+
+    if primary_interlocutor:
+        needle = primary_interlocutor.strip().lower()
+        tareas = [
+            t for t in tareas
+            if t.primary_interlocutor and t.primary_interlocutor.strip().lower() == needle
+        ]
+
+    total_disponibles = len(tareas)
+    tareas = tareas[:limite]
+
+    return ListaTareas(
+        tareas=[_tarea_a_resumen(t) for t in tareas],
+        total_disponibles=total_disponibles,
+        truncado=total_disponibles > limite,
+    )
+
+
+@app.patch("/api/tareas/{task_id}/estado")
+async def actualizar_estado_tarea_endpoint(
+    task_id: int,
+    payload: CambioEstadoTarea,
+    request: Request,
+):
+    """Cambia el estado EOS de una tarea. Valida transicion legal (§6.4)
+    antes de aplicar. Va directo a Bitrix sin pasar por el agente.
+
+    Semantica identica a la tool actualizar_estado_tarea del agente:
+    si owner viene, se resuelve por user.search; si la transicion es
+    ilegal, devuelve 409 con el motivo.
+    """
+    user_id = _user_id_de(request)
+    usuario = USUARIOS_POR_USERNAME.get(user_id)
+    if usuario is None or not usuario.get("webhook_bitrix"):
+        raise HTTPException(status_code=500, detail=f"Usuario '{user_id}' sin contexto Bitrix.")
+
+    webhook = usuario["webhook_bitrix"]
+
+    # Validar enum destino
+    try:
+        estado_enum = EstadoEOS(payload.nuevo_estado)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"nuevo_estado invalido: '{payload.nuevo_estado}'. Debe ser uno de: "
+                   f"{', '.join(e.value for e in EstadoEOS)}",
+        )
+
+    # Parsear review_date si viene
+    review_dt: datetime | None = None
+    if payload.review_date:
+        try:
+            review_dt = datetime.fromisoformat(payload.review_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"review_date invalida: '{payload.review_date}'")
+
+    # Resolver owner si viene (fail loud si 0 o N matches)
+    responsable_id: int | None = None
+    if payload.owner and payload.owner.strip():
+        # Reusa el resolver que ya vive en tools.py
+        resuelto, error_msg = await tools._resolver_owner(webhook, payload.owner)
+        if error_msg:
+            raise HTTPException(status_code=400, detail=error_msg)
+        responsable_id = resuelto
+
+    # Fetch tarea actual para validar transicion
+    try:
+        tarea = await bitrix_tasks.obtener_tarea(webhook, task_id)
+    except Exception as e:
+        logger.error(
+            "server", "tarea_fetch_error",
+            f"No pude leer tarea {task_id}: {type(e).__name__}: {e}",
+            user_id=user_id, error=e,
+        )
+        raise HTTPException(status_code=404, detail=f"No pude leer la tarea {task_id}: {e}")
+
+    try:
+        tarea.validar_transicion_a(estado_enum)
+    except TransicionIlegal as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    # Construir cambios
+    cambios: dict = {"status_eos": estado_enum}
+    if payload.next_action is not None:
+        cambios["next_action"] = payload.next_action
+    if payload.expected_result is not None:
+        cambios["expected_result"] = payload.expected_result
+    if review_dt is not None:
+        cambios["review_date"] = review_dt
+    if payload.escalation_condition is not None:
+        cambios["escalation_condition"] = payload.escalation_condition
+
+    try:
+        await bitrix_tasks.actualizar_tarea(
+            webhook, task_id, cambios,
+            responsable_id=responsable_id,
+        )
+    except Exception as e:
+        logger.error(
+            "server", "tarea_update_error",
+            f"Error actualizando tarea {task_id}: {type(e).__name__}: {e}",
+            user_id=user_id, error=e,
+        )
+        raise HTTPException(status_code=502, detail=f"Error actualizando en Bitrix: {e}")
+
+    return {
+        "ok": True,
+        "id": task_id,
+        "estado_anterior": tarea.status_eos.value if tarea.status_eos else None,
+        "estado_nuevo": estado_enum.value,
+        "responsable_id": responsable_id,
+    }
+
 
 
 # ---- Servir el frontend compilado ------------------------------------------
