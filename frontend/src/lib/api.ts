@@ -4,7 +4,6 @@
 
 import type {
   Evento,
-  Tarea,
   RespuestaListaTareas,
   CambioEstadoTarea,
   EstadoEOS,
