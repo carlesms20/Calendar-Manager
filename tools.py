@@ -1153,3 +1153,445 @@ async def actualizar_estado_tarea(
             + "."
         ),
     }
+
+# ============================================================================
+# CONVERSACION EJECUTIVA - CONSOLIDACION DE REUNIONES (Sprint 1 Bloque A)
+# PHASE 1 §2.5-§2.8, PHASE 2 §1-4, PHASE 6 Doc 3 §11.
+# ============================================================================
+
+# Marcador que crear_evento_bitrix inserta en DESCRIPTION cuando el Evento
+# tiene 'involucrado' (ver bitrix.py:118-123). Lo reutilizamos aqui para
+# extraer el interlocutor de eventos existentes en Bitrix sin duplicar
+# convencion. Si algun dia se cambia el prefijo, debe cambiarse en ambos
+# sitios; hoy es una constante de facto compartida.
+_PREFIJO_INVOLUCRADO = "Involucrado:"
+
+# Palabras clave que sugieren que un asunto NO deberia consolidarse con
+# otros por confidencialidad. La deteccion es intencionadamente
+# conservadora: solo levanta un flag informativo para que el LLM lo
+# considere; no bloquea la propuesta por si sola. La decision final
+# aplica el juicio semantico del LLM sobre razones_a_evaluar.
+_PALABRAS_CONFIDENCIALES = (
+    "confidencial", "privado", "off the record", "a solas",
+    "secreto", "sensible", "restringido",
+)
+
+
+def _normalizar_interlocutor(nombre: str) -> str:
+    """Clave canonica para agrupar. Case-insensitive, sin espacios
+    laterales. NO intenta desambiguar "Carlos" vs "Carlos Perez": esa
+    logica es responsabilidad de _resolver_owner cuando toque materializar
+    la reunion, no de la deteccion. Aqui preferimos falsos positivos
+    (proponer consolidar dos "Carlos" distintos y que el CEO lo aclare)
+    a falsos negativos (no detectar la agrupacion por diferencias de
+    escritura)."""
+    return (nombre or "").strip().lower()
+
+
+def _extraer_involucrado_de_descripcion(descripcion: str) -> str:
+    """Recupera el nombre de 'Involucrado: X' que crear_evento_bitrix
+    inserta al principio de la descripcion. Devuelve '' si no lo
+    encuentra. Tolera mayusculas/minusculas y variantes con : o :\\n."""
+    if not descripcion:
+        return ""
+    for linea in descripcion.splitlines():
+        stripped = linea.strip()
+        if stripped.lower().startswith(_PREFIJO_INVOLUCRADO.lower()):
+            return stripped[len(_PREFIJO_INVOLUCRADO):].strip()
+    return ""
+
+
+def _tiene_palabras_confidenciales(*textos: str) -> bool:
+    """True si alguna de las cadenas contiene alguna palabra clave
+    de confidencialidad. Case-insensitive."""
+    for t in textos:
+        if not t:
+            continue
+        t_low = t.lower()
+        for kw in _PALABRAS_CONFIDENCIALES:
+            if kw in t_low:
+                return True
+    return False
+
+
+async def proponer_consolidacion(
+    user_id: str,
+    ventana_dias: int = 14,
+) -> dict:
+    """Detecta candidatos a Reunion Ejecutiva agrupando elementos activos
+    por interlocutor principal (PHASE 1 §2.6, PHASE 2 §1-3, PHASE 6 Doc 3 §11).
+
+    NO modifica nada. Solo detecta y devuelve. La creacion efectiva de la
+    reunion (con confirmacion del CEO) es responsabilidad de
+    crear_reunion_ejecutiva.
+
+    Fuentes que revisa:
+    1. Eventos futuros del calendario en la ventana, con el interlocutor
+       parseado desde el prefijo 'Involucrado:' de DESCRIPTION.
+    2. Tareas activas con requires_conversation=True y primary_interlocutor
+       no vacio.
+    3. Operaciones 'crear' evento en el buffer del usuario con
+       involucrado no vacio. Esto habilita el caso mas comun del Sprint:
+       el CEO acaba de preparar N eventos con la misma persona en el
+       mismo turno y aun no ha confirmado.
+
+    Agrupa por interlocutor (case-insensitive, sin desambiguacion de
+    apellidos) y devuelve solo grupos con >=2 elementos.
+
+    Aplica los checks DETERMINISTAS del Meeting Compatibility Test §2.7:
+    - mismo interlocutor: garantizado por definicion de grupo.
+    - duracion agregada razonable: flag si suma > 120 min (§2.7).
+    - senal heuristica de confidencialidad: flag si aparecen palabras
+      clave ('confidencial', 'privado', 'a solas'...) en titulo o
+      descripcion de algun elemento.
+
+    Los checks difusos (contexto relacionado, urgencias divergentes,
+    conflictos entre Owners, preparacion incompatible) NO se automatizan:
+    se exponen como 'razones_a_evaluar' para que el LLM aplique juicio
+    antes de proponer al CEO. La regla final la impone §2.8: consolidar
+    solo si nada obliga a separar.
+
+    Args:
+        ventana_dias: cuantos dias hacia adelante inspeccionar el
+            calendario. Default 14. Reducir a 7 cuando el CEO pregunta
+            "esta semana".
+    """
+    print(f"TOOL[{user_id}]: proponer_consolidacion ventana={ventana_dias}d")
+
+    try:
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e), "grupos": []}
+
+    from models import TZ_LOCAL, EstadoEOS
+    from bitrix_tasks import listar_tareas
+
+    ahora = datetime.now(TZ_LOCAL)
+    ventana_fin = ahora + timedelta(days=max(1, ventana_dias))
+
+    # Estructura acumuladora: clave = interlocutor normalizado.
+    # Value = {"display": nombre tal cual aparece por primera vez,
+    #          "elementos": [dict, ...]}
+    grupos: dict[str, dict] = {}
+
+    def _add(interlocutor: str, elemento: dict):
+        clave = _normalizar_interlocutor(interlocutor)
+        if not clave:
+            return
+        entrada = grupos.setdefault(clave, {"display": interlocutor.strip(), "elementos": []})
+        entrada["elementos"].append(elemento)
+
+    # --- 1. Eventos futuros del calendario ---
+    try:
+        eventos_bitrix = await consultar_ocupacion_bitrix(
+            webhook, bitrix_uid, ahora, ventana_fin,
+        )
+    except BitrixError as e:
+        return {"ok": False, "mensaje": f"Bitrix rechazo la busqueda de eventos: {e}",
+                "grupos": []}
+
+    for ev in eventos_bitrix:
+        descripcion = ev.get("DESCRIPTION", "") or ""
+        involucrado = _extraer_involucrado_de_descripcion(descripcion)
+        if not involucrado:
+            continue
+
+        date_from = ev.get("DATE_FROM")
+        date_to = ev.get("DATE_TO")
+        try:
+            inicio_dt = _parse_bitrix_date(date_from) if date_from else None
+            fin_dt = _parse_bitrix_date(date_to) if date_to else None
+        except Exception:
+            inicio_dt = fin_dt = None
+
+        duracion_min = None
+        if inicio_dt and fin_dt:
+            duracion_min = max(0, int((fin_dt - inicio_dt).total_seconds() / 60))
+
+        _add(involucrado, {
+            "tipo": "evento",
+            "id": ev.get("ID"),
+            "titulo": ev.get("NAME", ""),
+            "fecha_inicio": date_from,
+            "fecha_fin": date_to,
+            "duracion_min": duracion_min,
+            "descripcion": descripcion[:400],  # snippet, no full body
+        })
+
+    # --- 2. Tareas activas con requires_conversation ---
+    try:
+        tareas = await listar_tareas(webhook, filtro={"RESPONSIBLE_ID": bitrix_uid})
+    except Exception as e:
+        # No abortamos: si falla la consulta de tareas, aun tenemos
+        # eventos y buffer. Registramos y seguimos.
+        import logger
+        logger.warn(
+            "tools", "consolidacion_tareas_fallo",
+            f"No pude leer tareas para consolidacion: {type(e).__name__}: {e}",
+            user_id=user_id, error=e,
+        )
+        tareas = []
+
+    terminales = {EstadoEOS.COMPLETED, EstadoEOS.CANCELLED}
+    for t in tareas:
+        if t.status_eos in terminales:
+            continue
+        if not t.requires_conversation:
+            continue
+        if not t.primary_interlocutor:
+            continue
+        _add(t.primary_interlocutor, {
+            "tipo": "tarea",
+            "id": t.id,
+            "titulo": t.title,
+            "status_eos": t.status_eos.value if t.status_eos else None,
+            "next_action": t.next_action,
+            "expected_result": t.expected_result,
+            "conversation_purpose": t.conversation_purpose,
+            "review_date": t.review_date.isoformat() if t.review_date else None,
+        })
+
+    # --- 3. Buffer de eventos pendientes ---
+    for op in _buffer(user_id):
+        if op["tipo"] != "crear":
+            continue
+        payload: Evento = op["payload"]
+        if not payload.involucrado:
+            continue
+        _add(payload.involucrado, {
+            "tipo": "buffer_evento",
+            "id": None,  # aun no tiene id Bitrix
+            "titulo": payload.nombre,
+            "fecha_inicio": payload.fecha_inicio.isoformat(),
+            "duracion_min": payload.duracion_min,
+            "descripcion": payload.descripcion or "",
+        })
+
+    # --- Filtrar: solo grupos con >=2 elementos ---
+    grupos_finales: list[dict] = []
+    for entrada in grupos.values():
+        elementos = entrada["elementos"]
+        if len(elementos) < 2:
+            continue
+
+        # Checks deterministas del §2.7
+        duracion_total = sum(
+            (el.get("duracion_min") or 0) for el in elementos
+        )
+        excede_120 = duracion_total > 120
+
+        confidencial = any(
+            _tiene_palabras_confidenciales(el.get("titulo", ""), el.get("descripcion", ""))
+            for el in elementos
+        )
+
+        # Fechas heterogeneas: si los elementos con fecha estan repartidos
+        # en dias distintos, es senal fuerte de que consolidar ahorra
+        # cambios de contexto (PHASE 6 Doc 3 §11 - Conversation Batching).
+        dias_distintos = set()
+        for el in elementos:
+            fi = el.get("fecha_inicio")
+            if isinstance(fi, str) and len(fi) >= 10:
+                dias_distintos.add(fi[:10])
+        rangos_amplios = len(dias_distintos) >= 2
+
+        grupos_finales.append({
+            "interlocutor": entrada["display"],
+            "n_elementos": len(elementos),
+            "elementos": elementos,
+            "duracion_total_estimada_min": duracion_total or None,
+            "senales": {
+                "duracion_excede_120": excede_120,
+                "revisar_confidencialidad": confidencial,
+                "elementos_en_dias_distintos": rangos_amplios,
+            },
+            "razones_a_evaluar": [
+                "Compatibilidad de participantes: revisa si los elementos "
+                "requieren distintos asistentes (§2.7).",
+                "Contexto relacionado: valora si los temas pueden abordarse "
+                "en una misma sesion sin degradar la calidad de la decision.",
+                "Urgencias divergentes: revisa si algun elemento tiene "
+                "fecha limite que obligue a resolverlo antes que el resto.",
+                "Preparacion incompatible: comprueba si algun asunto exige "
+                "material o decisiones previas que otro no.",
+                (
+                    "Confidencialidad: se han detectado palabras clave "
+                    "sensibles - revisa antes de proponer consolidar."
+                ) if confidencial else (
+                    "Confidencialidad: sin senales evidentes, pero valora "
+                    "si algun tema exige privacidad especifica."
+                ),
+            ],
+        })
+
+    # Ordenar grupos por numero de elementos descendente (mas relevante primero)
+    grupos_finales.sort(key=lambda g: g["n_elementos"], reverse=True)
+
+    print(f"TOOL[{user_id}]: proponer_consolidacion detecto "
+          f"{len(grupos_finales)} grupo(s) con >=2 elementos")
+
+    if not grupos_finales:
+        return {
+            "ok": True,
+            "total_grupos": 0,
+            "ventana_dias": ventana_dias,
+            "grupos": [],
+            "mensaje": (
+                f"No hay grupos con >=2 elementos compartiendo interlocutor "
+                f"en los proximos {ventana_dias} dias (revisando eventos "
+                f"futuros, tareas activas con requires_conversation, y buffer "
+                f"pendiente). No procede proponer consolidacion."
+            ),
+        }
+
+    return {
+        "ok": True,
+        "total_grupos": len(grupos_finales),
+        "ventana_dias": ventana_dias,
+        "grupos": grupos_finales,
+        "mensaje": (
+            f"{len(grupos_finales)} grupo(s) con >=2 elementos por "
+            f"interlocutor. Antes de proponer consolidar al usuario, "
+            f"aplica el juicio §2.7 sobre razones_a_evaluar y §2.8 "
+            f"(no consolidar si el asunto se resuelve mejor asincrono)."
+        ),
+    }
+
+
+async def crear_reunion_ejecutiva(
+    user_id: str,
+    interlocutor: str,
+    temas: list[str],
+    duracion_min: int,
+    fecha_inicio: datetime | str,
+    ids_relacionados: list[str] | None = None,
+    resultado_esperado: str = "",
+    prioridad: str | None = None,
+) -> dict:
+    """Prepara la creacion de UN evento consolidado que agrupa varios
+    temas con el mismo interlocutor principal (PHASE 1 §2.6, §2.8;
+    PHASE 2 §4; PHASE 6 Doc 3 §11).
+
+    NO crea nada aun en Bitrix. Se anade al buffer de operaciones
+    pendientes del usuario, igual que crear_evento, y se ejecuta cuando
+    el CEO confirme con confirmar_operaciones_pendientes. Esto mantiene
+    el patron Analyse -> Propose -> Confirm -> Execute.
+
+    IMPORTANTE (§2.8):
+    - NO borra ni modifica las tareas o eventos originales que motivaron
+      la reunion. Se conservan tal cual.
+    - Los ids_relacionados, si vienen, solo se citan en la descripcion
+      generada como trazabilidad. La consolidacion es un agregado, no un
+      reemplazo. El post-meeting processing (que asuntos cerrar, cuales
+      renovar) queda para Sprint 4, no lo tocamos aqui.
+
+    Args:
+        interlocutor: persona principal de la reunion. Se guarda en
+            'involucrado' del Evento.
+        temas: lista de puntos de agenda, uno por asunto a tratar. Cada
+            elemento es un titulo corto (una frase). La tool los numera
+            y los formatea en la descripcion del evento como agenda
+            estructurada.
+        duracion_min: duracion total estimada de la reunion.
+        fecha_inicio: cuando arranca. ISO 8601 o datetime. Debe venir de
+            un hueco real (usa consultar_huecos_libres antes).
+        ids_relacionados: opcional. Lista de ids (evento o tarea) que
+            esta reunion pretende consolidar. Se incluyen en la descripcion
+            para trazabilidad. NO se tocan; solo se referencian.
+        resultado_esperado: opcional. Frase breve con el criterio de
+            exito de la reunion. Se incluye en la descripcion.
+        prioridad: opcional 'alta'|'media'|'baja'. Si no se pasa, se
+            calcula automaticamente (categoria empresa + involucrado =>
+            al menos media, alta si hay fecha_limite cercana).
+    """
+    print(f"TOOL[{user_id}]: crear_reunion_ejecutiva interlocutor={interlocutor!r} "
+          f"n_temas={len(temas) if temas else 0} duracion={duracion_min}min")
+
+    # Validaciones basicas antes de tocar buffer
+    if not interlocutor or not interlocutor.strip():
+        return {"ok": False, "mensaje": "Falta el interlocutor de la reunion."}
+    if not temas or not isinstance(temas, list):
+        return {"ok": False, "mensaje": (
+            "Falta 'temas'. Pasa una lista con al menos un asunto a tratar."
+        )}
+    temas_limpios = [t.strip() for t in temas if isinstance(t, str) and t.strip()]
+    if not temas_limpios:
+        return {"ok": False, "mensaje": "La lista de temas esta vacia tras limpiar."}
+    if duracion_min is None or duracion_min <= 0:
+        return {"ok": False, "mensaje": "duracion_min debe ser un entero positivo."}
+
+    # Coercion de fecha_inicio
+    if isinstance(fecha_inicio, str):
+        try:
+            fecha_inicio = datetime.fromisoformat(fecha_inicio)
+        except ValueError:
+            return {"ok": False, "mensaje": f"fecha_inicio invalida: '{fecha_inicio}'."}
+
+    # Construir nombre del evento
+    if len(temas_limpios) == 1:
+        nombre = f"Reunion con {interlocutor.strip()}: {temas_limpios[0]}"
+    else:
+        primer_tema = temas_limpios[0]
+        restantes = len(temas_limpios) - 1
+        nombre = (
+            f"Reunion con {interlocutor.strip()}: {primer_tema} "
+            f"+ {restantes} asunto{'s' if restantes != 1 else ''} mas"
+        )
+    # Cap defensivo de longitud (Bitrix truncara igual, pero por higiene)
+    if len(nombre) > 200:
+        nombre = nombre[:197] + "..."
+
+    # Construir descripcion con agenda estructurada
+    lineas: list[str] = []
+    lineas.append(f"Reunion ejecutiva con {interlocutor.strip()}.")
+    lineas.append("")
+    if resultado_esperado.strip():
+        lineas.append(f"Resultado esperado: {resultado_esperado.strip()}")
+        lineas.append("")
+    lineas.append("Agenda:")
+    for i, tema in enumerate(temas_limpios, start=1):
+        lineas.append(f"  {i}. {tema}")
+    if ids_relacionados:
+        ids_str = [str(i).strip() for i in ids_relacionados if str(i).strip()]
+        if ids_str:
+            lineas.append("")
+            lineas.append(
+                f"Consolida los siguientes elementos (no se modifican, "
+                f"solo se agrupan aqui para trabajarlos juntos): "
+                f"{', '.join(ids_str)}"
+            )
+    descripcion = "\n".join(lineas)
+
+    # Delegar en crear_evento para reutilizar toda la maquinaria: dedup
+    # por (nombre, fecha_inicio), calculo automatico de prioridad,
+    # validacion del modelo Evento, insercion al buffer, retorno
+    # homogeneo. Categoria fija empresa: una reunion ejecutiva por
+    # definicion es empresa.
+    resultado = await crear_evento(
+        user_id=user_id,
+        nombre=nombre,
+        duracion_min=int(duracion_min),
+        fecha_inicio=fecha_inicio,
+        categoria="empresa",
+        involucrado=interlocutor.strip(),
+        descripcion=descripcion,
+        tipo_actividad="reunion",
+        prioridad=prioridad,
+    )
+
+    # Enriquecer el retorno con contexto propio para que el LLM tenga
+    # a mano lo que acaba de proponer, sin re-consultar el buffer.
+    if not resultado.get("ok"):
+        return resultado
+
+    resultado["reunion_ejecutiva"] = True
+    resultado["interlocutor"] = interlocutor.strip()
+    resultado["n_temas"] = len(temas_limpios)
+    resultado["ids_relacionados"] = list(ids_relacionados) if ids_relacionados else []
+    resultado["mensaje"] = (
+        f"Reunion ejecutiva con {interlocutor.strip()} preparada "
+        f"({len(temas_limpios)} tema(s), {duracion_min} min). "
+        f"Los elementos originales NO se han tocado. "
+        f"Total pendientes: {resultado.get('operaciones_pendientes_total', '?')}."
+    )
+    return resultado

@@ -53,6 +53,8 @@ from tools import (
     crear_tarea,
     consultar_tareas,
     actualizar_estado_tarea,
+    proponer_consolidacion,
+    crear_reunion_ejecutiva,
 )
 
 load_dotenv()
@@ -113,6 +115,11 @@ Mapeo pregunta → tool:
   "delega esto a W" → crear_tarea.
 - "márcalo como delegado/hecho/cancelado", "esa tarea ya está en 
   progreso", "cámbiale el estado a W" → actualizar_estado_tarea.
+- "qué tengo con X esta semana", "cómo llevo lo de Y", "todo lo pendiente 
+  con Z", "puedo juntar todo esto en una reunión", "no será mejor una 
+  sola reunión" → proponer_consolidacion (opcionalmente precedido de 
+  consultar_eventos o consultar_tareas para contexto). Ver sección 
+  CONVERSACIÓN EJECUTIVA más abajo.
 
 La palabra "pendiente" es ambigua. Si acabamos de preparar eventos y aún 
 no se han confirmado, es el buffer → listar_eventos_preparados. En 
@@ -391,6 +398,76 @@ consultar_tareas NO tiene texto_libre como consultar_eventos. Si el
 usuario pide "busca la tarea que hablaba de X" o "cuál era la de Y", 
 lista todas las activas y filtra tú mentalmente por el título en la 
 lista devuelta. Nunca pases texto_libre a consultar_tareas.
+
+# CONVERSACIÓN EJECUTIVA — CONSOLIDACIÓN DE REUNIONES
+Regla PHASE 1 §2.6: si dos o más elementos activos (eventos futuros, 
+tareas con requires_conversation, o eventos en el buffer) comparten 
+interlocutor principal, la respuesta por defecto es UNA reunión con 
+agenda estructurada, no N conversaciones separadas.
+
+Cuándo invocar proponer_consolidacion:
+- Cuando el CEO ha preparado dos o más crear_evento con el mismo 
+  involucrado en este turno (antes de pedirle que confirme la creación 
+  aislada, comprueba si conviene consolidar).
+- Cuando el CEO pregunta "qué tengo con X esta semana", "cómo llevo lo 
+  de Y", o similar.
+- Proactivamente antes de crear un nuevo evento si ya sabes que la 
+  persona tiene otros elementos activos con el CEO.
+
+Flujo obligatorio (Analyse → Propose → Confirm → Execute):
+1. Llama a proponer_consolidacion(ventana_dias=14) — o menor si el CEO 
+   acota temporalmente ("esta semana" = 7, "los próximos días" = 5).
+2. La tool devuelve grupos con ≥2 elementos por interlocutor y señales 
+   heurísticas del Meeting Compatibility Test §2.7. Los checks 
+   deterministas (mismo interlocutor, duración, keywords 
+   confidenciales) ya están hechos.
+3. Aplica juicio semántico sobre razones_a_evaluar:
+   - ¿Los temas están razonablemente relacionados o son heterogéneos?
+   - ¿Alguno tiene urgencia radicalmente distinta que obligue a 
+     resolverlo antes que el resto?
+   - ¿Alguno requiere confidencialidad o participantes distintos?
+   - ¿Hay preparación incompatible entre los asuntos?
+   - Asynchronous-First (§2.5 punto 9): ¿alguno se resuelve mejor por 
+     email/mensaje que en reunión?
+4. Si hay razones objetivas para separar, mantén los elementos aislados 
+   y en tu respuesta al CEO documenta el "Compatibility Reason" (§2.7). 
+   Ej: "Mantengo separado el punto de tarifas de Nubimed porque es 
+   confidencial y no debe tratarse en la reunión general con Carlos."
+5. Si comparten interlocutor y NO detectas una razón objetiva para separar 
+    (confidencialidad concreta, participantes que requieren estar/no estar, 
+    urgencia que fuerza resolver uno antes que otro, preparación incompatible), 
+    PROPONE la consolidación de forma clara y afirmativa: "Comparten interlocutor y no veo razón para separarlas 
+    — propongo consolidar en una reunión con agenda: [temas]. ¿Confirmas?". No la ofrezcas como "opcional 
+    salvo que prefieras juntarlas": la respuesta por defecto es agrupar, y el CEO decide si separar.
+    Si hay varios elementos y solo algunos son compatibles, propone consolidación parcial 
+    en lugar de descartar todo (ej: "propongo agrupar A, B y C; mantengo D y E aparte porque [razón]").
+6. Si el CEO confirma agrupar, llama a crear_reunion_ejecutiva con los 
+   datos pactados y pasa ids_relacionados con los ids de los eventos 
+   o tareas originales (para trazabilidad). Esto añade la nueva reunión 
+   al buffer, pero NO borra los originales (§2.8: "no se eliminan tareas 
+   por haber sido agrupadas"). El post-meeting processing (qué cerrar, 
+   qué renovar) llegará en un sprint posterior.
+7. Continúa el flujo estándar: responder_texto pidiendo confirmación de 
+   toda la lista pendiente, y confirmar_operaciones_pendientes cuando 
+   el CEO la dé.
+
+Un solo elemento también puede originar una Reunión Ejecutiva individual 
+cuando cumpla §2.6: impacto crítico, desbloquea a varias personas, 
+requiere decisión estratégica, no cabe en asíncrono, o la fecha límite 
+obliga a reservar hueco específico. En ese caso no hay grupo pero sí 
+justificación explícita — cuéntasela al CEO al proponer.
+
+REGLAS DURAS §2.8 (no las violes):
+- No propongas consolidar si el asunto se resuelve mejor de forma 
+  asíncrona (email, mensaje breve, decisión unilateral). Evalúa 
+  Asynchronous-First antes que consolidar.
+- Nunca crees una reunión ejecutiva sin confirmación expresa del CEO.
+- Nunca elimines ni modifiques las tareas o eventos originales por 
+  haberlos agrupado; siguen vivos en su sitio.
+- Nunca dupliques un tema en dos reuniones activas sin razón documentada.
+- Si el interlocutor viene con nombre ambiguo ("Carlos" y hay dos), 
+  crear_reunion_ejecutiva no bloquea, pero avisa al CEO del riesgo y 
+  pide que aclare antes de confirmar.
 
 # ESTILO DE RESPUESTA
 - Claro, directivo, sin relleno. Tono de management práctico.
@@ -1033,10 +1110,125 @@ TOOLS_SCHEMA = [
             "required": ["id", "nuevo_estado"],
         },
     },
+    {
+        "name": "proponer_consolidacion",
+        "description": (
+            "Detecta candidatos a Reunion Ejecutiva agrupando por "
+            "interlocutor los eventos futuros del calendario, las tareas "
+            "activas con requires_conversation=True y las creaciones "
+            "pendientes en el buffer. Devuelve solo grupos con >=2 "
+            "elementos que comparten interlocutor (case-insensitive). "
+            "Aplica los checks deterministas del Meeting Compatibility "
+            "Test (PHASE 1 §2.7) y expone razones a evaluar para los "
+            "checks difusos que debe juzgar el LLM antes de proponer. "
+            "NO modifica nada: solo detecta. Usala cuando el CEO ha "
+            "preparado varios eventos con la misma persona, cuando "
+            "pregunta 'como llevo lo de X' o 'que tengo con Y', o "
+            "proactivamente antes de agendar un nuevo evento con alguien "
+            "que ya tiene otros elementos activos con el CEO."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ventana_dias": {
+                    "type": "integer",
+                    "description": (
+                        "Dias hacia adelante a inspeccionar (default 14). "
+                        "Usa 7 cuando el CEO acota 'esta semana', o 30 "
+                        "cuando pide una vision mas amplia."
+                    ),
+                    "minimum": 1,
+                    "maximum": 60,
+                },
+            },
+        },
+    },
+    {
+        "name": "crear_reunion_ejecutiva",
+        "description": (
+            "Prepara UN evento consolidado que agrupa varios temas con "
+            "el mismo interlocutor (PHASE 1 §2.6, §2.8; PHASE 2 §4). "
+            "NO se crea en Bitrix aun: entra al buffer de operaciones "
+            "pendientes y se ejecuta cuando el CEO confirme, como "
+            "cualquier crear_evento. IMPORTANTE §2.8: no borra ni "
+            "modifica los elementos originales; solo los referencia en "
+            "la descripcion generada. Antes de llamar a esta tool: "
+            "(1) valida con juicio semantico que consolidar respeta el "
+            "Meeting Compatibility Test, (2) obten el hueco propuesto "
+            "con consultar_huecos_libres, (3) obten confirmacion "
+            "explicita del CEO sobre agrupar. La tool escribe la agenda "
+            "estructurada dentro de la descripcion del evento."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "interlocutor": {
+                    "type": "string",
+                    "description": (
+                        "Persona principal de la reunion. Se guarda en el "
+                        "campo involucrado del evento."
+                    ),
+                },
+                "temas": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Lista de asuntos a tratar. Cada elemento es un "
+                        "titulo corto (una frase). La tool los numera "
+                        "como agenda estructurada."
+                    ),
+                    "minItems": 1,
+                },
+                "duracion_min": {
+                    "type": "integer",
+                    "description": (
+                        "Duracion total estimada en minutos. Suma "
+                        "razonable de lo que tomaria cada tema, con "
+                        "margen. Alerta si supera 120."
+                    ),
+                    "minimum": 1,
+                },
+                "fecha_inicio": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 con offset local de Madrid (+02:00 "
+                        "verano, +01:00 invierno). Debe venir de un "
+                        "hueco real obtenido con consultar_huecos_libres."
+                    ),
+                },
+                "ids_relacionados": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Opcional. IDs de los eventos o tareas ya "
+                        "existentes que motivan la consolidacion. Se "
+                        "citan en la descripcion como trazabilidad. NO "
+                        "se modifican ni se borran (§2.8)."
+                    ),
+                },
+                "resultado_esperado": {
+                    "type": "string",
+                    "description": (
+                        "Opcional. Frase breve con el criterio de exito "
+                        "de la reunion. Se incluye al principio de la "
+                        "descripcion."
+                    ),
+                },
+                "prioridad": {
+                    "type": "string",
+                    "enum": ["alta", "media", "baja"],
+                    "description": (
+                        "Opcional. Solo pasala si el CEO la fija "
+                        "explicitamente; si la omites se calcula "
+                        "automaticamente."
+                    ),
+                },
+            },
+            "required": ["interlocutor", "temas", "duracion_min",
+                         "fecha_inicio"],
+        },
+    },
 ]
-
-# Cache breakpoint en la ultima tool: cachea todo el bloque tools.
-TOOLS_SCHEMA[-1]["cache_control"] = {"type": "ephemeral"}
 
 # Cache breakpoint en la ultima tool: cachea todo el bloque tools.
 TOOLS_SCHEMA[-1]["cache_control"] = {"type": "ephemeral"}
@@ -1058,6 +1250,8 @@ _TOOLS_ASYNC = {
     "crear_tarea": crear_tarea,
     "consultar_tareas": consultar_tareas,
     "actualizar_estado_tarea": actualizar_estado_tarea,
+    "proponer_consolidacion": proponer_consolidacion,
+    "crear_reunion_ejecutiva": crear_reunion_ejecutiva,
 }
 
 
