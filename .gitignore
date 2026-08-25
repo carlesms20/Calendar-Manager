@@ -8,3 +8,7 @@ venv/
 frontend.zip
 frontend/dist/
 frontend/node_modules/
+
+# Snapshots del frontend que se comparten por chat, no van al repo
+*.zip
+frontend/dist/
