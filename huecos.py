@@ -59,6 +59,53 @@ def _fusionar_ocupados(ocupados: list[tuple[datetime, datetime]]) -> list[tuple[
             fusionados.append((inicio, fin))
     return fusionados
 
+def _expandir_bloques_a_ocupados(
+    bloques: list[dict],
+    fecha_desde: datetime,
+    fecha_hasta: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Expande bloques recurrentes semanales a intervalos ocupados concretos.
+
+    Cada bloque tiene (dias_semana, hora_inicio, hora_fin). Recorremos día
+    a día el rango [fecha_desde, fecha_hasta] y por cada día generamos un
+    intervalo si su weekday() está en dias_semana del bloque.
+
+    Ejemplo: bloque "gym L-V 07:00-08:00" en un rango de 3 días (mié-vie)
+    produce 3 intervalos ocupados, uno por día.
+
+    NO añadimos MARGEN_MIN a los bloques: los eventos Bitrix llevan margen
+    porque son citas con transiciones/desplazamientos; los bloques son
+    tiempo protegido del CEO y el margen ya está implícito en cómo el
+    usuario los define.
+
+    Args:
+        bloques: lista de dicts con dias_semana (list[int]), hora_inicio
+            (time), hora_fin (time). El shape es el que devuelve
+            bloques.listar_activos_para_calculo.
+        fecha_desde, fecha_hasta: rango a expandir (ambos aware).
+    """
+    if not bloques:
+        return []
+
+    ocupados: list[tuple[datetime, datetime]] = []
+    dia = fecha_desde.date()
+    dia_fin = fecha_hasta.date()
+    while dia <= dia_fin:
+        wd = dia.weekday()
+        for bloque in bloques:
+            if wd not in bloque["dias_semana"]:
+                continue
+            inicio = datetime.combine(dia, bloque["hora_inicio"], tzinfo=TZ_LOCAL)
+            fin = datetime.combine(dia, bloque["hora_fin"], tzinfo=TZ_LOCAL)
+            # Recortar al rango solicitado por si el bloque cae parcialmente
+            # fuera (ej: consulta arranca a las 07:30 y el bloque es 07:00-08:00,
+            # el intervalo ocupado real es 07:30-08:00).
+            inicio = max(inicio, fecha_desde)
+            fin = min(fin, fecha_hasta)
+            if inicio < fin:
+                ocupados.append((inicio, fin))
+        dia += timedelta(days=1)
+    return ocupados
 
 def _huecos_dia(
     dia_inicio: datetime,
@@ -96,6 +143,7 @@ def _calcular_huecos(
     incluir_fuera_horario: bool,
     ahora: datetime,
     parse_fecha,
+    bloques_no_negociables: list[dict] | None = None,
 ) -> list[dict]:
     """Núcleo del algoritmo, testeable sin red.
 
@@ -108,6 +156,9 @@ def _calcular_huecos(
             del horario laboral.
         ahora: para tests deterministas.
         parse_fecha: fn (str) -> datetime, para parsear DATE_FROM/TO de Bitrix.
+        bloques_no_negociables: bloques recurrentes semanales del usuario.
+            Se restan como intervalos ocupados adicionales. Default None
+            para no romper callers que aún no los pasan (tests, etc).
     """
     # 1) Recortar al presente: no proponemos huecos en el pasado
     if fecha_desde < ahora:
@@ -142,6 +193,15 @@ def _calcular_huecos(
         ocupados.append((
             inicio - timedelta(minutes=MARGEN_MIN),
             fin + timedelta(minutes=MARGEN_MIN),
+        ))
+
+    # 2b) Añadir bloques no negociables como intervalos ocupados adicionales.
+    # Se hace ANTES de fusionar para que solapes entre bloque y evento
+    # (ej: cita médica solapando con el gym) queden colapsados en un unico
+    # intervalo y no se rompa la lógica de _huecos_dia.
+    if bloques_no_negociables:
+        ocupados.extend(_expandir_bloques_a_ocupados(
+            bloques_no_negociables, fecha_desde, fecha_hasta,
         ))
 
     ocupados = _fusionar_ocupados(ocupados)

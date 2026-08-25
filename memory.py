@@ -39,10 +39,10 @@ _client: Client = create_client(_SUPABASE_URL, _SUPABASE_KEY)
 # Umbral de mensajes por encima del cual se dispara el resumen.
 # Cuando check_history devuelva True, agent.procesar_input llama a
 # summarize sobre los mas viejos y los borra.
-_UMBRAL_RESUMEN = 15
+_UMBRAL_RESUMEN = 25
 
 # Cuantos mensajes se resumen en cada disparo.
-_MSG_A_RESUMIR = 8
+_MSG_A_RESUMIR = 15
 
 
 async def save_message(user_id: str, role: str, content: str) -> None:

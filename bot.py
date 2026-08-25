@@ -1,62 +1,207 @@
-#Canal de entrada / salida de telegram. Orquestador del agente.
+"""Canal de entrada / salida de Telegram. Orquestador del agente para el
+bot de Alexander y Carles.
 
+Autorizacion multiusuario: cada mensaje entrante se resuelve contra
+USUARIOS_POR_TELEGRAM_ID de config_usuarios. Si el telegram_id no esta
+en el dict, se rechaza con "No autorizado". Si esta, se extrae el
+user_id logico ("carles"|"alexander") y se propaga a agent.procesar_input,
+que a su vez lo propaga a memoria (Supabase) y a las tools (Bitrix).
+
+Dev mode: si NINGUN usuario esta configurado en el dict (ambos telegram_id
+env vars vacios), el bot arranca pero rechaza todo. No hay modo "abierto"
+como antes — con multi-usuario tiene que haber al menos una entrada valida.
+"""
 import asyncio
 import sys
-import logging #libreria para implementar un log de events tipo: logging.WARNING("Lo que sea...")
+import logging
 from os import getenv
 from dotenv import load_dotenv
 from aiogram.client.default import DefaultBotProperties
-from aiogram import Dispatcher, Bot, F #F es magic filters, uso: F.text...
+from aiogram import Dispatcher, Bot, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
+
 import agent
 import memory
-import voice #transcripcion de audio con gemini multimodal
+import voice
+import logger
+from config_usuarios import USUARIOS_POR_TELEGRAM_ID, usuario_por_telegram_id
 
 load_dotenv()
 TOKEN = getenv("API_BOT")
 
-dp = Dispatcher() #enruta los mensajes que llegan, según el tipo
+if not USUARIOS_POR_TELEGRAM_ID:
+    logger.warn(
+        "bot", "no_authorized_users",
+        "USUARIOS_POR_TELEGRAM_ID vacio. Configura CARLES_TELEGRAM_ID "
+        "y/o ALEXANDER_TELEGRAM_ID en el .env. Sin ellos, el bot "
+        "rechazara todos los mensajes.",
+    )
+else:
+    logger.info(
+        "bot", "startup",
+        f"{len(USUARIOS_POR_TELEGRAM_ID)} usuario(s) autorizado(s) cargados desde config.",
+        metadata={"count": len(USUARIOS_POR_TELEGRAM_ID)},
+    )
+
+dp = Dispatcher()
 
 
-async def procesar_texto_usuario(texto: str, message: Message):
-    """Delega en agent.procesar_input y responde por Telegram."""
-    respuesta = await agent.procesar_input("alexander", texto)
+def _resolver_usuario(message: Message) -> dict | None:
+    """Devuelve el contexto del usuario (dict con user_id, webhook, etc.)
+    si el mensaje viene de un telegram_id autorizado, o None si no.
+    Loggea rechazos para dejar rastro de intentos no autorizados.
+    """
+    if not message.from_user:
+        # Mensajes de canal o edge cases raros: rechazar por defecto
+        return None
+
+    usuario = usuario_por_telegram_id(message.from_user.id)
+    if usuario is None:
+        logger.warn(
+            "bot", "rejected_unauthorized",
+            f"Rechazado telegram_id={message.from_user.id} "
+            f"username=@{message.from_user.username}",
+            metadata={
+                "telegram_id": message.from_user.id,
+                "telegram_username": message.from_user.username,
+                "telegram_full_name": message.from_user.full_name,
+            },
+        )
+        return None
+
+    return usuario
+
+
+async def procesar_texto_usuario(user_id: str, texto: str, message: Message):
+    """Delega en agent.procesar_input y responde por Telegram.
+
+    user_id es el identificador logico ("carles"|"alexander") ya resuelto
+    en el handler, que se usa como clave en Supabase y para el lookup
+    del contexto Bitrix dentro de las tools.
+
+    Loggea la respuesta del agente truncada a 200 chars para trazabilidad
+    en Railway sin ensuciar con textos larguisimos.
+    """
+    respuesta = await agent.procesar_input(user_id, texto)
+    resp_log = respuesta[:200] + ("..." if len(respuesta) > 200 else "")
+    logger.info(
+        "bot", "reply_sent",
+        f"Respuesta del agente: '{resp_log}'",
+        user_id=user_id,
+        metadata={"respuesta_len": len(respuesta)},
+    )
     await message.answer(respuesta)
 
+
 async def text_handler(message: Message):
-    await procesar_texto_usuario(message.text, message)
+    usuario = _resolver_usuario(message)
+    if usuario is None:
+        await message.answer("No autorizado.")
+        return
+
+    user_id = usuario["user_id"]
+    logger.info(
+        "bot", "message_received",
+        f"Mensaje texto: '{(message.text or '')[:200]}'",
+        user_id=user_id,
+        metadata={
+            "telegram_id": message.from_user.id,
+            "telegram_username": message.from_user.username,
+            "kind": "text",
+            "texto_len": len(message.text or ""),
+        },
+    )
+    await procesar_texto_usuario(user_id, message.text, message)
+
 
 async def audio_handler(message: Message):
-    #Descargar el fichero de voz de Telegram usando el file_id
+    usuario = _resolver_usuario(message)
+    if usuario is None:
+        await message.answer("No autorizado.")
+        return
+
+    user_id = usuario["user_id"]
+
+    # Descargar el fichero de voz de Telegram usando el file_id
     voice_msg = message.voice
     file = await message.bot.get_file(voice_msg.file_id)
     audio_bytes_io = await message.bot.download_file(file.file_path)
     audio_bytes = audio_bytes_io.read()
 
-    #Transcribir con Gemini (bloque try por si falla la API, para no romper el bot)
+    # Transcribir con Gemini (bloque try por si falla la API, para no romper el bot)
     try:
         texto = await voice.transcribir(audio_bytes, mime_type=voice_msg.mime_type or "audio/ogg")
-        print(f"BOT: audio transcrito: '{texto}'")
+        logger.info(
+            "bot", "audio_transcribed",
+            f"Audio transcrito: '{texto[:200]}'",
+            user_id=user_id,
+            metadata={
+                "mime_type": voice_msg.mime_type,
+                "duration": getattr(voice_msg, "duration", None),
+            },
+        )
     except Exception as e:
-        print(f"BOT: error transcribiendo: {e}")
+        logger.error(
+            "bot", "audio_transcription_error",
+            f"Error transcribiendo audio: {type(e).__name__}: {e}",
+            user_id=user_id,
+            metadata={"mime_type": voice_msg.mime_type},
+            error=e,
+        )
         await message.answer("No he podido entender el audio, prueba de nuevo por favor.")
         return
 
-    #El texto transcrito entra al mismo pipeline que un mensaje escrito
-    await procesar_texto_usuario(texto, message)
+    # Filtro anti-basura: transcripciones vacias, timestamps sueltos
+    # ('00:00'), o cadenas triviales de ruido. Sin esto, un audio mudo
+    # o con solo ruido de fondo entra al pipeline del agente gastando
+    # tokens y produciendo respuestas erraticas.
+    texto_limpio = texto.strip()
+    if len(texto_limpio) < 3 or texto_limpio in {"00:00", "0:00", "...", "…"}:
+        logger.info(
+            "bot", "audio_filtered_as_noise",
+            f"Audio transcrito vacio o irrelevante ('{texto_limpio}'), ignorando",
+            user_id=user_id,
+            metadata={"texto_transcrito": texto_limpio},
+        )
+        await message.answer("No he entendido el audio, intentalo de nuevo por favor.")
+        return
+
+    # El texto transcrito entra al mismo pipeline que un mensaje escrito
+    await procesar_texto_usuario(user_id, texto_limpio, message)
+
 
 async def file_handler(message: Message):
-    print("He recibido file.")
+    usuario = _resolver_usuario(message)
+    if usuario is None:
+        await message.answer("No autorizado.")
+        return
+    user_id = usuario["user_id"]
+    logger.info(
+        "bot", "file_received_unsupported",
+        "Recibido file (aun no soportado).",
+        user_id=user_id,
+        metadata={
+            "telegram_id": message.from_user.id if message.from_user else None,
+            "has_photo": bool(message.photo),
+            "has_document": bool(message.document),
+            "has_video": bool(message.video),
+        },
+    )
+
 
 async def main():
-    bot = Bot(token=TOKEN, default=DefaultBotProperties()) #crea una instancia de bot, con token y propiedades que se usan en toda llamada, es la representacion de "el codigo" en telegram, permite registrar token...
-    
+    if not TOKEN:
+        raise RuntimeError("Falta API_BOT en el entorno. Revisa el .env.")
+
+    bot = Bot(token=TOKEN, default=DefaultBotProperties())
+
     dp.message.register(text_handler, F.text)
     dp.message.register(audio_handler, F.voice)
     dp.message.register(file_handler, F.photo | F.document | F.video)
 
-    await dp.start_polling(bot) #bucle infinito de espera de mensajes, el dispatcher enruta a los respectivos tipos de msg
- 
+    await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
-    asyncio.run(main()) #se inicia asi ya que no puedes hacer "await" por que el if no es funcion async -- inicia un bucle gestionado por async para main
+    asyncio.run(main())
