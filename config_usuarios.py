@@ -59,6 +59,13 @@ _ALEXANDER = {
     "app_password": getenv("APP_PASSWORD_ALEXANDER", ""),
 }
 
+_CARLOS = {
+    "user_id": "carlos",
+    "webhook_bitrix": getenv("WEBHOOK_BITRIX_CARLOS", ""),
+    "bitrix_user_id": _int_env("BITRIX_USER_ID_CARLOS"),
+    "app_password": getenv("APP_PASSWORD_CARLOS", ""),
+}
+
 
 # --- Indices ---
 # Los construimos filtrando los usuarios sin telegram_id o sin
@@ -67,16 +74,20 @@ _ALEXANDER = {
 
 _CARLES_TG = _int_env("CARLES_TELEGRAM_ID")
 _ALEXANDER_TG = _int_env("ALEXANDER_TELEGRAM_ID")
+_CARLOS_TG = _int_env("CARLOS_TELEGRAM_ID")
 
 USUARIOS_POR_TELEGRAM_ID: dict[int, dict] = {}
 if _CARLES_TG:
     USUARIOS_POR_TELEGRAM_ID[_CARLES_TG] = _CARLES
 if _ALEXANDER_TG:
     USUARIOS_POR_TELEGRAM_ID[_ALEXANDER_TG] = _ALEXANDER
+if _CARLOS_TG:
+    USUARIOS_POR_TELEGRAM_ID[_CARLOS_TG] = _CARLOS
 
 USUARIOS_POR_USERNAME: dict[str, dict] = {
     "carles": _CARLES,
     "alexander": _ALEXANDER,
+    "carlos": _CARLOS,
 }
 
 
