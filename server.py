@@ -32,6 +32,7 @@ import logger
 from bitrix import BitrixError, consultar_ocupacion_bitrix
 from config_usuarios import USUARIOS_POR_USERNAME, autenticar_web, USUARIOS_POR_TELEGRAM_ID
 import bitrix_tasks
+import brief as brief_engine
 from models import EstadoEOS, TransicionIlegal
 
 load_dotenv()
@@ -62,6 +63,7 @@ _RUTAS_PROTEGIDAS_PREFIJOS = (
     "/api/audio",
     "/api/eventos",
     "/api/tareas",
+    "/api/brief",
 )
 
 
@@ -179,6 +181,7 @@ class TareaResumen(BaseModel):
     status_eos: str | None = None
     task_type: str | None = None
     alexander_role: str | None = None
+    deadline: str | None = None
     next_action: str | None = None
     expected_result: str | None = None
     review_date: str | None = None
@@ -213,6 +216,7 @@ class CambioEstadoTarea(BaseModel):
     next_action: str | None = None
     expected_result: str | None = None
     review_date: str | None = None
+    deadline: str | None = None
     escalation_condition: str | None = None
 
 
@@ -573,6 +577,7 @@ def _tarea_a_resumen(t) -> TareaResumen:
         status_eos=t.status_eos.value if t.status_eos else None,
         task_type=t.task_type.value if t.task_type else None,
         alexander_role=t.alexander_role.value if t.alexander_role else None,
+        deadline=t.deadline.isoformat() if t.deadline else None,
         next_action=t.next_action,
         expected_result=t.expected_result,
         review_date=t.review_date.isoformat() if t.review_date else None,
@@ -704,6 +709,14 @@ async def actualizar_estado_tarea_endpoint(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"review_date invalida: '{payload.review_date}'")
 
+    # Parsear deadline si viene
+    deadline_dt: datetime | None = None
+    if payload.deadline:
+        try:
+            deadline_dt = datetime.fromisoformat(payload.deadline)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"deadline invalida: '{payload.deadline}'")
+
     # Resolver owner si viene (fail loud si 0 o N matches)
     responsable_id: int | None = None
     if payload.owner and payload.owner.strip():
@@ -737,6 +750,8 @@ async def actualizar_estado_tarea_endpoint(
         cambios["expected_result"] = payload.expected_result
     if review_dt is not None:
         cambios["review_date"] = review_dt
+    if deadline_dt is not None:
+        cambios["deadline"] = deadline_dt
     if payload.escalation_condition is not None:
         cambios["escalation_condition"] = payload.escalation_condition
 
@@ -760,6 +775,48 @@ async def actualizar_estado_tarea_endpoint(
         "estado_nuevo": estado_enum.value,
         "responsable_id": responsable_id,
     }
+
+
+# ---- /api/brief ------------------------------------------------------------
+# Executive Brief diario (Sprint 3, PHASE 1 §4).
+
+@app.get("/api/brief")
+async def obtener_brief(
+    request: Request,
+    fecha: str | None = Query(None, description="YYYY-MM-DD. Si vacio, hoy."),
+):
+    """Devuelve el Executive Brief del usuario autenticado para el dia
+    indicado (por defecto hoy). Se regenera en cada llamada — no hay
+    cache. El coste dominante es la sintesis LLM (~2s + ~500 tokens).
+
+    Response: BriefEjecutivo (13 secciones + metadata). El frontend lo
+    consume tal cual desde useBrief.
+
+    Requiere Basic Auth (ruta protegida por el middleware).
+    """
+    user_id = _user_id_de(request)
+    usuario = USUARIOS_POR_USERNAME.get(user_id)
+    if usuario is None or not usuario.get("webhook_bitrix"):
+        raise HTTPException(status_code=500, detail=f"Usuario '{user_id}' sin contexto Bitrix.")
+
+    fecha_dt: datetime | None = None
+    if fecha:
+        try:
+            fecha_dt = datetime.fromisoformat(fecha)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"fecha invalida: '{fecha}' (usa YYYY-MM-DD)")
+
+    try:
+        b = await brief_engine.generar_brief(user_id, fecha_ref=fecha_dt)
+    except Exception as e:
+        logger.error(
+            "server", "brief_generation_error",
+            f"Fallo generar_brief: {type(e).__name__}: {e}",
+            user_id=user_id, error=e,
+        )
+        raise HTTPException(status_code=502, detail=f"Error generando el brief: {e}")
+
+    return b.model_dump()
 
 
 

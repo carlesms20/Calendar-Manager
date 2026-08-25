@@ -7,6 +7,7 @@ import type {
   RespuestaListaTareas,
   CambioEstadoTarea,
   EstadoEOS,
+  BriefEjecutivo,
 } from "./types";
 
 export interface RespuestaAgente {
@@ -201,4 +202,39 @@ export function completarTarea(id: number) {
  */
 export function cancelarTarea(id: number) {
   return actualizarEstadoTarea(id, { nuevo_estado: "Cancelled" });
+}
+
+// ---------------------------------------------------------------------------
+// EXECUTIVE BRIEF (Sprint 3, PHASE 1 §4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Obtiene el Executive Brief del usuario autenticado para el dia dado.
+ * Si se omite `fecha`, el backend genera el brief de hoy en Europe/Madrid.
+ *
+ * El brief se GENERA cada vez que se llama (no hay cache de servidor).
+ * El backend hace 1 llamada Sonnet + 3 fetches Bitrix. Latencia tipica: 3-8s.
+ * El frontend deberia mostrar un skeleton/spinner mientras carga.
+ */
+export async function obtenerBrief(fecha?: Date): Promise<BriefEjecutivo> {
+  const params = new URLSearchParams();
+  if (fecha) {
+    // El backend acepta YYYY-MM-DD (fromisoformat lo parsea).
+    const y = fecha.getFullYear();
+    const m = String(fecha.getMonth() + 1).padStart(2, "0");
+    const d = String(fecha.getDate()).padStart(2, "0");
+    params.append("fecha", `${y}-${m}-${d}`);
+  }
+  const qs = params.toString();
+  const url = qs ? `/api/brief?${qs}` : "/api/brief";
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new ApiError(
+      res.status,
+      await _extraerError(res, "Error generando el brief"),
+    );
+  }
+
+  return await res.json();
 }

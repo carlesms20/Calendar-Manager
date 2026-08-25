@@ -3,8 +3,9 @@ import { FileText } from "lucide-react";
 import Chat from "../components/Chat";
 import Composer from "../components/Composer";
 import FocusDelDia from "../components/FocusDelDia";
-import PlaceholderNoImplementado from "../components/PlaceholderNoImplementado";
+import Brief from "../components/Brief";
 import { enviarTexto, enviarAudio } from "../lib/api";
+import { useBrief } from "../lib/useBrief";
 import type { Message, Tarea } from "../lib/types";
 
 interface Props {
@@ -22,13 +23,14 @@ interface Props {
  * Vista "Mi día". Home del CEO.
  *
  * Composicion:
- * 1. Cabecera de vista con boton "Ver Brief" (Sprint 3 placeholder).
+ * 1. Cabecera de vista con boton "Ver Brief".
  * 2. FocusDelDia: 3 buckets con lo urgente (bloqueado, vencido, deadline).
  *    Reemplaza la sensacion de "chat vacio" con contexto operativo real.
  * 3. Chat con el agente + composer.
  *
- * Cuando Sprint 3 este hecho, "Ver Brief" mostrara el brief completo
- * en lugar del placeholder.
+ * "Ver Brief" abre el modal con el Executive Brief completo (Sprint 3,
+ * PHASE 1 §4). El brief se genera bajo demanda — coste ~500 tokens
+ * Anthropic + latencia 3-8s.
  */
 export default function MiDia({
   mensajes,
@@ -41,6 +43,17 @@ export default function MiDia({
   onIrATareas,
 }: Props) {
   const [briefAbierto, setBriefAbierto] = useState(false);
+  const briefState = useBrief();
+
+  function handleAbrirBrief() {
+    setBriefAbierto(true);
+    // Cargar bajo demanda. Si ya hay uno cargado (misma sesion), no lo
+    // regeneramos automaticamente: el usuario puede pulsar el boton de
+    // refresh si quiere uno nuevo. Ahorra tokens.
+    if (!briefState.brief && !briefState.cargando) {
+      briefState.cargar();
+    }
+  }
 
   async function handleEnviarTexto(texto: string) {
     if (!texto.trim() || procesando) return;
@@ -92,7 +105,7 @@ export default function MiDia({
         </h2>
 
         <button
-          onClick={() => setBriefAbierto(true)}
+          onClick={handleAbrirBrief}
           className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors"
           style={{
             background: "var(--color-surface-hover)",
@@ -132,12 +145,13 @@ export default function MiDia({
         </div>
       </div>
 
-      <PlaceholderNoImplementado
+      <Brief
         abierto={briefAbierto}
         onCerrar={() => setBriefAbierto(false)}
-        titulo="Executive Brief matutino"
-        referenciaPhase="PHASE 1 §4 · Sprint 3"
-        descripcion="Resumen ejecutivo diario con 13 secciones: Executive Summary, Calendar Overview, Three Key Outcomes, Quick Actions, People Blocked by Alexander, Executive Conversations, Delegated Work, Waiting for Responses, Proposed Work Blocks, Not Today, Remaining Task Inventory, Missing Information e Integrity Check. Se generará automáticamente cada mañana laborable."
+        brief={briefState.brief}
+        cargando={briefState.cargando}
+        error={briefState.error}
+        onRecargar={briefState.recargar}
       />
     </div>
   );

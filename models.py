@@ -217,6 +217,12 @@ class Tarea(BaseModel):
     task_type: TipoTarea | None = None
     alexander_role: RolAlexander | None = None
 
+    # --- Fecha limite nativa Bitrix (campo DEADLINE, no UF_) ---
+    # PHASE 1 §8.1 distingue Deadline (cuando hay que terminar) de
+    # Review Date (cuando revisar delegacion/waiting). Bitrix tiene
+    # DEADLINE nativo; lo mapeamos aqui como campo distinto.
+    deadline: datetime | None = None
+
     # --- UF_* Ejecucion ---
     next_action: str | None = None
     expected_result: str | None = None
@@ -235,10 +241,10 @@ class Tarea(BaseModel):
     meeting_candidate: bool | None = None
     related_meeting_id: str | None = None
 
-    @field_validator("review_date")
+    @field_validator("review_date", "deadline")
     @classmethod
-    def _normalizar_tz_review_date(cls, v):
-        """Asegura tzinfo, como Evento.fecha_inicio. Si viene naive,
+    def _normalizar_tz_fechas(cls, v):
+        """Asegura tzinfo en review_date y deadline. Si viene naive,
         asumimos Europe/Madrid para no romper aritmetica de fechas
         contra datetime.now(TZ_LOCAL)."""
         if v is None:
@@ -320,6 +326,7 @@ class Tarea(BaseModel):
             "status_eos":            s(self.status_eos),
             "task_type":             s(self.task_type),
             "alexander_role":        s(self.alexander_role),
+            "deadline":              s(self.deadline),
             "next_action":           s(self.next_action),
             "expected_result":       s(self.expected_result),
             "review_date":           s(self.review_date),

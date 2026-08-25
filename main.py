@@ -24,6 +24,7 @@ from server import app as fastapi_app
 # nuevo aqui para no acoplarnos al `dp` global de bot.py (aunque tambien
 # funcionaria usarlo directamente).
 from bot import text_handler, audio_handler, file_handler
+from brief_scheduler import run_brief_scheduler
 
 load_dotenv()
 
@@ -60,11 +61,13 @@ async def run_server():
 
 
 async def main():
-    """Corre bot y server en paralelo. Si uno lanza excepcion, gather
-    cancela el otro y propaga el error. Railway relanzara el proceso."""
+    """Corre bot, server y scheduler del brief en paralelo. Si uno lanza
+    excepcion, gather cancela los otros y propaga el error. Railway
+    relanzara el proceso."""
     await asyncio.gather(
         run_bot(),
         run_server(),
+        run_brief_scheduler(),
     )
 
 

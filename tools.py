@@ -812,6 +812,7 @@ async def crear_tarea(
     next_action: str | None = None,
     expected_result: str | None = None,
     review_date: datetime | None = None,
+    deadline: datetime | None = None,
     source: str | None = "Bitrix24",
     risk: str | None = None,
     escalation_condition: str | None = None,
@@ -865,6 +866,11 @@ async def crear_tarea(
             review_date = datetime.fromisoformat(review_date)
         except ValueError:
             return {"ok": False, "mensaje": f"review_date invalida: '{review_date}'."}
+    if isinstance(deadline, str):
+        try:
+            deadline = datetime.fromisoformat(deadline)
+        except ValueError:
+            return {"ok": False, "mensaje": f"deadline invalida: '{deadline}'."}
 
     # --- Validacion de enums ---
     try:
@@ -895,6 +901,7 @@ async def crear_tarea(
             next_action=next_action or None,
             expected_result=expected_result or None,
             review_date=review_date,
+            deadline=deadline,
             source=source or None,
             risk=risk or None,
             escalation_condition=escalation_condition or None,
@@ -1046,6 +1053,7 @@ async def actualizar_estado_tarea(
     next_action: str | None = None,
     expected_result: str | None = None,
     review_date: datetime | None = None,
+    deadline: datetime | None = None,
     escalation_condition: str | None = None,
 ) -> dict:
     """Cambia el status_eos de una tarea y, en la misma llamada,
@@ -1088,6 +1096,11 @@ async def actualizar_estado_tarea(
             review_date = datetime.fromisoformat(review_date)
         except ValueError:
             return {"ok": False, "mensaje": f"review_date invalida: '{review_date}'."}
+    if isinstance(deadline, str):
+        try:
+            deadline = datetime.fromisoformat(deadline)
+        except ValueError:
+            return {"ok": False, "mensaje": f"deadline invalida: '{deadline}'."}
 
     # --- Resolver owner si viene ---
     nuevo_responsable_id: int | None = None
@@ -1117,6 +1130,8 @@ async def actualizar_estado_tarea(
         cambios["expected_result"] = expected_result
     if review_date is not None:
         cambios["review_date"] = review_date
+    if deadline is not None:
+        cambios["deadline"] = deadline
     if escalation_condition is not None:
         cambios["escalation_condition"] = escalation_condition
 

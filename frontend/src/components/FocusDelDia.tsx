@@ -36,6 +36,10 @@ export default function FocusDelDia({ tareas, cargando, onIrATareas }: Props) {
 
     const bloqueadas = tareas.filter((t) => t.status_eos === "Blocked");
 
+    // Waiting/Delegated con review_date vencido (fecha de supervision
+    // pasada = follow-up debido). Aqui review_date SI es lo correcto:
+    // PHASE 1 §8.1 lo define como fecha de control directivo, y para
+    // Waiting/Delegated coincide con el next_follow_up.
     const esperandoVencidas = tareas.filter((t) => {
       if (t.status_eos !== "Waiting" && t.status_eos !== "Delegated") return false;
       if (!t.review_date) return false;
@@ -43,12 +47,17 @@ export default function FocusDelDia({ tareas, cargando, onIrATareas }: Props) {
       return !isNaN(rev.getTime()) && rev <= ahora;
     });
 
+    // Deadline proximo: usa el campo deadline REAL (nativo Bitrix
+    // DEADLINE), no review_date. Sprint 3 anadio el campo distinto en
+    // el modelo — antes conflatabamos. PHASE 1 §8.1 distingue:
+    //   Deadline    = cuando hay que terminar la tarea
+    //   Review Date = cuando revisar delegacion / follow-up
     const deadlineProximo = tareas.filter((t) => {
-      if (!t.review_date) return false;
-      const rev = new Date(t.review_date);
-      if (isNaN(rev.getTime())) return false;
-      // Excluimos ya vencidas (se muestran en su bucket si aplica)
-      return rev > ahora && rev <= en3dias;
+      if (!t.deadline) return false;
+      const dl = new Date(t.deadline);
+      if (isNaN(dl.getTime())) return false;
+      // Excluimos ya vencidas (aparecen en su propio bucket)
+      return dl > ahora && dl <= en3dias;
     });
 
     return { bloqueadas, esperandoVencidas, deadlineProximo };

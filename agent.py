@@ -891,7 +891,18 @@ TOOLS_SCHEMA = [
                     "description": (
                         "ISO 8601. Fecha de control directivo (cuando el "
                         "CEO revisa el avance). Recomendado para Delegated "
-                        "y In Progress."
+                        "y In Progress. NO es lo mismo que deadline."
+                    ),
+                },
+                "deadline": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601. Fecha limite para completar la tarea "
+                        "(cuando debe estar hecha). Distinto de review_date, "
+                        "que es cuando el CEO hace seguimiento. Ej: si el "
+                        "usuario dice 'hay que entregarlo el viernes', eso "
+                        "es deadline; si dice 'reviso el jueves', es "
+                        "review_date."
                     ),
                 },
                 "source": {
@@ -1096,7 +1107,16 @@ TOOLS_SCHEMA = [
                     "type": "string",
                     "description": (
                         "ISO 8601. Update de UF_REVIEW_DATE. Obligatorio "
-                        "conceptualmente para 'In Progress' y 'Delegated'."
+                        "conceptualmente para 'In Progress' y 'Delegated'. "
+                        "NO es lo mismo que deadline."
+                    ),
+                },
+                "deadline": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601. Update de DEADLINE nativo Bitrix "
+                        "(fecha limite de la tarea). Distinto de "
+                        "review_date, que es fecha de supervision."
                     ),
                 },
                 "escalation_condition": {

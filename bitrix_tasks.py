@@ -172,6 +172,9 @@ def tarea_a_bitrix_fields(tarea: Tarea) -> dict:
     # Sync STATUS nativo cuando conocemos el status EOS
     if tarea.status_eos is not None:
         fields["STATUS"] = STATUS_BITRIX_POR_EOS[tarea.status_eos]
+    # DEADLINE es campo NATIVO Bitrix (no UF_). Va aparte de _CAMPOS_UF.
+    if tarea.deadline is not None:
+        fields["DEADLINE"] = _serializar_valor(tarea.deadline, "datetime")
     return fields
 
 
@@ -198,6 +201,12 @@ def cambios_a_bitrix_fields(cambios: dict) -> dict:
         if attr == "title":
             if val is not None:
                 fields["TITLE"] = str(val)
+            continue
+        # DEADLINE es campo NATIVO Bitrix (no UF_). Se maneja aparte porque
+        # no vive en _INDICE_ATTR (que solo cubre UF_*).
+        if attr == "deadline":
+            if val is not None:
+                fields["DEADLINE"] = _serializar_valor(val, "datetime")
             continue
         if attr not in _INDICE_ATTR:
             raise ValueError(
@@ -263,6 +272,13 @@ def bitrix_dict_a_tarea(raw: dict) -> Tarea:
         "id":    id_val,
         "title": str(d.get("TITLE") or ""),
     }
+
+    # DEADLINE nativo Bitrix. Lo parseamos aparte de los UF_ porque no
+    # vive en _CAMPOS_UF. Si Bitrix lo devuelve "" o null, deadline=None.
+    dl_raw = d.get("DEADLINE")
+    if dl_raw not in (None, ""):
+        kwargs["deadline"] = _parse_datetime_bitrix(dl_raw)
+    # (si es None/vacio, dejamos que el default None del modelo aplique)
 
     for attr, clave, tipo in _CAMPOS_UF:
         val = d.get(clave)

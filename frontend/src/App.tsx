@@ -73,9 +73,12 @@ export default function App() {
     return eventos.filter((e) => e.fecha_inicio?.slice(0, 10) === hoyStr).length;
   }, [eventos]);
 
-  // Contador de atencion requerida: bloqueadas + waiting vencido + deadline<=3d.
-  // Duplicamos ligeramente la logica de FocusDelDia pero es 5 lineas y aqui
-  // solo necesitamos el numero, no la lista.
+  // Contador de atencion requerida: bloqueadas + waiting/delegated
+  // vencidos (review_date pasada) + deadline dentro de 3 dias.
+  // Espeja la logica de FocusDelDia bucket a bucket; aqui solo
+  // necesitamos el numero total, no la lista. Sprint 3 introdujo el
+  // campo `deadline` distinto de `review_date` (PHASE 1 §8.1); el
+  // tercer bucket usa `deadline` real, no la fecha de supervision.
   const atencionRequerida = useMemo(() => {
     const ahora = new Date();
     const en3dias = new Date(ahora.getTime() + 3 * 24 * 60 * 60 * 1000);
@@ -86,9 +89,9 @@ export default function App() {
         const rev = new Date(t.review_date);
         if (!isNaN(rev.getTime()) && rev <= ahora) { n++; continue; }
       }
-      if (t.review_date) {
-        const rev = new Date(t.review_date);
-        if (!isNaN(rev.getTime()) && rev > ahora && rev <= en3dias) { n++; }
+      if (t.deadline) {
+        const dl = new Date(t.deadline);
+        if (!isNaN(dl.getTime()) && dl > ahora && dl <= en3dias) { n++; }
       }
     }
     return n;
