@@ -46,7 +46,7 @@ from config_usuarios import USUARIOS_POR_USERNAME
 # CONFIG
 # ============================================================================
 
-_API_KEY = getenv("ANTHROPIC_API_KEY", "")
+_API_KEY = getenv("API_ANTHROPIC", "")
 _client: AsyncAnthropic | None = None
 MODELO = "claude-sonnet-5"
 MAX_TOKENS_SYNTHESIS = 800
@@ -67,7 +67,7 @@ def _get_client() -> AsyncAnthropic:
     global _client
     if _client is None:
         if not _API_KEY:
-            raise RuntimeError("Falta ANTHROPIC_API_KEY para generar el brief.")
+            raise RuntimeError("Falta API_ANTHROPIC para generar el brief.")
         _client = AsyncAnthropic(api_key=_API_KEY, max_retries=3)
     return _client
 
