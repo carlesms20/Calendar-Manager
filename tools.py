@@ -951,9 +951,15 @@ async def consultar_tareas(
     primary_interlocutor: str | None = None,
     solo_activos: bool = True,
     limite: int = 50,
+    **kwargs_ignorados,
 ) -> dict:
     """Lista las tareas del usuario en Bitrix con los UF_* del EOS
     materializados.
+
+    Nota Sprint 4: **kwargs_ignorados absorbe args que el LLM pueda
+    inventarse pese al prompt (visto texto_libre pese a instruccion
+    explicita). Sin esto, cada llamada errada quema un turno completo.
+    Si se ignora algo, se logea para tenerlo controlado.
 
     Por defecto devuelve solo tareas activas (excluye Completed y
     Cancelled), que es lo que el LLM necesita para responder "¿que
@@ -975,6 +981,9 @@ async def consultar_tareas(
     """
     print(f"TOOL[{user_id}]: consultar_tareas estado={estado!r} type={task_type!r} "
           f"interlocutor={primary_interlocutor!r} activos={solo_activos}")
+    if kwargs_ignorados:
+        print(f"TOOL[{user_id}] WARN: consultar_tareas args ignorados: "
+              f"{list(kwargs_ignorados.keys())}")
 
     try:
         webhook, bitrix_uid = _contexto_bitrix(user_id)
