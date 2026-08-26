@@ -43,6 +43,8 @@ _CAMPOS_UF: list[tuple] = [
     ("expected_result",       "UF_EXPECTED_RESULT",       "str"),
     ("review_date",           "UF_REVIEW_DATE",           "datetime"),
     ("source",                "UF_SOURCE",                "str"),
+    ("preparation_required",  "UF_PREPARATION_REQUIRED",  "str"),
+    ("next_action_if_missed", "UF_NEXT_ACTION_IF_MISSED", "str"),
     ("risk",                  "UF_RISK",                  "str"),
     ("escalation_condition",  "UF_ESCALATION_CONDITION",  "str"),
     ("requires_conversation", "UF_REQUIRES_CONVERSATION", "bool"),
@@ -282,6 +284,14 @@ def bitrix_dict_a_tarea(raw: dict) -> Tarea:
             kwargs["status_bitrix_nativo"] = int(st_raw)
         except (TypeError, ValueError):
             kwargs["status_bitrix_nativo"] = None
+
+    # RESPONSIBLE_ID nativo Bitrix (Sprint 4). Para resolver owner.
+    resp_raw = d.get("RESPONSIBLE_ID")
+    if resp_raw not in (None, ""):
+        try:
+            kwargs["responsable_id_bitrix"] = int(resp_raw)
+        except (TypeError, ValueError):
+            kwargs["responsable_id_bitrix"] = None
 
     # DEADLINE nativo Bitrix. Lo parseamos aparte de los UF_ porque no
     # vive en _CAMPOS_UF. Si Bitrix lo devuelve "" o null, deadline=None.

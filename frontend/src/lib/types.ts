@@ -69,6 +69,8 @@ export interface Tarea {
   source: string | null;
   risk: string | null;
   escalation_condition: string | null;
+  preparation_required: string | null;   // Sprint 4 §7.2
+  next_action_if_missed: string | null;  // Sprint 4 §7.2
   requires_conversation: boolean | null;
   primary_interlocutor: string | null;
   conversation_purpose: string | null;
@@ -92,6 +94,8 @@ export interface CambioEstadoTarea {
   review_date?: string; // ISO 8601
   deadline?: string;    // ISO 8601
   escalation_condition?: string;
+  preparation_required?: string;    // Sprint 4 §7.2
+  next_action_if_missed?: string;   // Sprint 4 §7.2
 }
 
 // -------------------------------------------------------------------------
@@ -127,10 +131,16 @@ export interface ItemTareaBrief {
   status_eos: EstadoEOS | null;
   task_type: TaskType | null;
   owner_es_ceo: boolean;
+  owner_nombre: string | null;      // Sprint 4: nombre resuelto Owner
   next_action: string | null;
   deadline: string | null;
   review_date: string | null;
   primary_interlocutor: string | null;
+  waiting_for: string | null;       // Sprint 4: expected_result si status=Waiting
+  dias_vencido: number | null;      // Sprint 4: dias desde review_date si vencio
+  escalation_condition: string | null;   // Sprint 4
+  preparation_required: string | null;   // Sprint 4
+  next_action_if_missed: string | null;  // Sprint 4
   razon: string | null;
 }
 
@@ -150,6 +160,9 @@ export interface KeyOutcome {
   items_relacionados: number[];
 }
 
+// Sprint 4 - Meeting Delegation Rule §7.4
+export type RecomendacionAsistencia = "asistir" | "delegar" | "decidir_asincrono" | string;
+
 export interface ItemConversacion {
   interlocutor: string;
   temas: string[];
@@ -160,6 +173,8 @@ export interface ItemConversacion {
   horario_propuesto: string | null;
   estado_confirmacion: string;
   impacto_no_celebrarla: string | null;
+  recomendacion_asistencia: RecomendacionAsistencia;  // Sprint 4
+  razon_recomendacion: string | null;                  // Sprint 4
 }
 
 export interface IntegrityFinding {

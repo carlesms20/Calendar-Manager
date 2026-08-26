@@ -36,11 +36,48 @@ from models import (
     Tarea, EstadoEOS, TipoTarea, RolAlexander, TZ_LOCAL,
 )
 import bitrix_tasks
-from bitrix import consultar_ocupacion_bitrix
+from bitrix import consultar_ocupacion_bitrix, solicitud as _bitrix_solicitud
 import bloques as bloques_mod
 import logger
 import usage
 from config_usuarios import USUARIOS_POR_USERNAME
+
+
+# ============================================================================
+# CACHE DE NOMBRES DE OWNER (Sprint 4)
+# ============================================================================
+# Bitrix devuelve RESPONSIBLE_ID como numero. Para el Brief resolvemos a
+# nombre humano ("Sandra Perez") con user.get. Cacheamos por (webhook_hash,
+# user_id) para no bombardear Bitrix con la misma llamada.
+#
+# TTL: sesion del proceso (los nombres cambian rarisimo). Se resetea al
+# redeploy y arreglado.
+_owner_cache: dict[tuple[str, int], str] = {}
+
+
+async def _resolver_owner_nombre(webhook: str, bitrix_uid: int) -> str | None:
+    """Resuelve un bitrix_user_id a 'Nombre Apellido'. Devuelve None si
+    Bitrix no lo conoce (fallback: caller muestra el id crudo o
+    '[NO DATA]')."""
+    if not bitrix_uid:
+        return None
+    key = (webhook[:40], bitrix_uid)
+    if key in _owner_cache:
+        return _owner_cache[key]
+    try:
+        result = await _bitrix_solicitud(webhook, "user.get", {"ID": bitrix_uid})
+        if isinstance(result, list) and result:
+            u = result[0]
+            nombre = (u.get("NAME") or "").strip()
+            apellido = (u.get("LAST_NAME") or "").strip()
+            completo = " ".join(x for x in (nombre, apellido) if x) or None
+            _owner_cache[key] = completo or ""
+            return completo
+    except Exception as e:
+        logger.warn("brief", "owner_resolve_error",
+                    f"user.get {bitrix_uid} fallo: {type(e).__name__}: {e}")
+    _owner_cache[key] = ""
+    return None
 
 # ============================================================================
 # CONFIG
@@ -89,21 +126,36 @@ class ItemCalendario(BaseModel):
 
 class ItemTarea(BaseModel):
     """Version compacta de una tarea para el brief. Menos campos que
-    TareaResumen: solo lo que el CEO necesita para orientarse."""
+    TareaResumen: solo lo que el CEO necesita para orientarse.
+
+    Sprint 4 anadio: owner_nombre (para delegadas), waiting_for
+    (descripcion humana de que se espera), dias_vencido (para follow-ups
+    y review_dates que vencieron), escalation_condition (visible en
+    delegadas), preparation_required, next_action_if_missed.
+    """
     id: int
     title: str
     status_eos: str | None = None
     task_type: str | None = None
     owner_es_ceo: bool
+    owner_nombre: str | None = None  # Sprint 4: nombre resuelto del Owner
     next_action: str | None = None
     deadline: str | None = None
     review_date: str | None = None
     primary_interlocutor: str | None = None
+    waiting_for: str | None = None  # Sprint 4: expected_result cuando status=Waiting
+    dias_vencido: int | None = None  # Sprint 4: dias desde review_date si vencio
+    escalation_condition: str | None = None  # Sprint 4
+    preparation_required: str | None = None  # Sprint 4
+    next_action_if_missed: str | None = None  # Sprint 4
     razon: str | None = None  # Explicacion CEO-facing de por que aparece aqui
 
 
 class ItemConversacion(BaseModel):
-    """Reunion propuesta o consolidacion detectada (§4.5)."""
+    """Reunion propuesta o consolidacion detectada (§4.5).
+
+    Sprint 4 anadio: recomendacion §7.4 Meeting Delegation Rule.
+    """
     interlocutor: str
     temas: list[str]
     tareas_relacionadas: list[int]
@@ -113,6 +165,9 @@ class ItemConversacion(BaseModel):
     horario_propuesto: str | None = None
     estado_confirmacion: str = "propuesta"
     impacto_no_celebrarla: str | None = None
+    # Sprint 4 (Bloque C) — Meeting Delegation Rule §7.4
+    recomendacion_asistencia: str = "asistir"  # asistir | delegar | decidir_asincrono
+    razon_recomendacion: str | None = None
 
 
 class KeyOutcome(BaseModel):
@@ -462,17 +517,47 @@ def _build_calendar_overview(
 # ============================================================================
 
 def _tarea_a_item(t: Tarea, razon: str | None = None,
-                  owner_es_ceo: bool = True) -> ItemTarea:
+                  owner_es_ceo: bool = True,
+                  owner_nombre: str | None = None,
+                  ahora: datetime | None = None) -> ItemTarea:
+    """Construye ItemTarea desde Tarea. Sprint 4: rellena tambien
+    owner_nombre (resuelto por _resolver_owner_nombre), waiting_for
+    (expected_result si status=Waiting), dias_vencido (dias desde
+    review_date si vencio) y los 2 campos §7.2 nuevos.
+
+    ahora: para tests determinismo; si None usa datetime.now(TZ_LOCAL).
+    """
+    if ahora is None:
+        ahora = datetime.now(TZ_LOCAL)
+
+    # waiting_for: solo tiene sentido en Waiting
+    waiting_for = None
+    if t.status_eos == EstadoEOS.WAITING and t.expected_result:
+        waiting_for = t.expected_result
+
+    # dias_vencido: si review_date < ahora
+    dias_vencido = None
+    if t.review_date:
+        delta = (ahora - t.review_date).days
+        if delta > 0:
+            dias_vencido = delta
+
     return ItemTarea(
         id=t.id or 0,
         title=t.title,
         status_eos=t.status_eos.value if t.status_eos else None,
         task_type=t.task_type.value if t.task_type else None,
         owner_es_ceo=owner_es_ceo,
+        owner_nombre=owner_nombre,
         next_action=t.next_action,
         deadline=t.deadline.isoformat() if t.deadline else None,
         review_date=t.review_date.isoformat() if t.review_date else None,
         primary_interlocutor=t.primary_interlocutor,
+        waiting_for=waiting_for,
+        dias_vencido=dias_vencido,
+        escalation_condition=t.escalation_condition,
+        preparation_required=t.preparation_required,
+        next_action_if_missed=t.next_action_if_missed,
         razon=razon,
     )
 
@@ -570,8 +655,16 @@ def _clasificar_tareas(
         if estado == EstadoEOS.WAITING:
             razon = None
             if t.review_date and t.review_date < ahora:
-                razon = "Follow-up vencido"
-            waiting.append(_tarea_a_item(t, razon=razon))
+                dias = (ahora - t.review_date).days
+                if dias == 0:
+                    razon = "Follow-up vencido hoy"
+                elif dias == 1:
+                    razon = "Follow-up vencido hace 1 día"
+                else:
+                    razon = f"Follow-up vencido hace {dias} días"
+            elif t.review_date is None:
+                razon = "Waiting sin follow-up fijado — riesgo de perderse"
+            waiting.append(_tarea_a_item(t, razon=razon, ahora=ahora))
             ids_ya_clasificados.add(t.id)
             continue
 
@@ -684,9 +777,76 @@ def _build_executive_conversations(
             impacto_no_celebrarla=(
                 f"{len(tareas_grupo)} asuntos siguen abiertos con {interlocutor_display}"
             ),
+            **_evaluar_meeting_delegation(tareas_grupo),
         ))
 
     return conversaciones
+
+
+def _evaluar_meeting_delegation(tareas_grupo: list[Tarea]) -> dict:
+    """Sprint 4 Bloque C — Meeting Delegation Rule (PHASE 1 §7.4).
+
+    Determina si Alexander DEBE asistir o si la reunion puede delegarse
+    o resolverse asincronamente. Deterministica: aplica reglas §7.4
+    sobre los alexander_role del grupo.
+
+    Devuelve dict con keys que se expanden al kwargs de ItemConversacion:
+      - recomendacion_asistencia: "asistir" | "delegar" | "decidir_asincrono"
+      - razon_recomendacion: frase corta que justifica
+
+    Reglas (evaluadas en orden, primera que casa gana):
+      1. TODOS son alexander_role=No Involvement -> delegar completo
+         (el CEO no aporta nada; el Owner puede reunirse solo).
+      2. TODOS son alexander_role in {Supervision, No Involvement} -> delegar
+         (el CEO recibe resumen despues).
+      3. TODOS son alexander_role=Approval Y todos tienen expected_result
+         claro -> decidir_asincrono (el CEO puede aprobar por escrito).
+      4. Cualquier otro caso -> asistir (Decision o Execution presentes).
+    """
+    roles = [t.alexander_role for t in tareas_grupo]
+    tiene_expected_result = all(t.expected_result for t in tareas_grupo)
+
+    # Filtramos None (rol sin poner) — lo tratamos como Execution
+    # defensivamente (si no sabemos, el CEO va).
+    roles_efectivos = [r if r is not None else RolAlexander.EXECUTION
+                       for r in roles]
+
+    todos_no_involvement = all(r == RolAlexander.NO_INVOLVEMENT
+                                for r in roles_efectivos)
+    todos_supervisables = all(r in (RolAlexander.SUPERVISION,
+                                     RolAlexander.NO_INVOLVEMENT)
+                               for r in roles_efectivos)
+    todos_approval = all(r == RolAlexander.APPROVAL
+                         for r in roles_efectivos)
+
+    if todos_no_involvement:
+        return {
+            "recomendacion_asistencia": "delegar",
+            "razon_recomendacion": (
+                "Ninguno de los asuntos requiere tu involucramiento. "
+                "Puede resolverse sin ti."
+            ),
+        }
+    if todos_supervisables:
+        return {
+            "recomendacion_asistencia": "delegar",
+            "razon_recomendacion": (
+                "Todo lo del grupo es supervision o delegado. "
+                "Recibe un resumen despues."
+            ),
+        }
+    if todos_approval and tiene_expected_result:
+        return {
+            "recomendacion_asistencia": "decidir_asincrono",
+            "razon_recomendacion": (
+                "Todo son aprobaciones con criterio claro. "
+                "Puedes aprobar por escrito sin reunion."
+            ),
+        }
+    return {
+        "recomendacion_asistencia": "asistir",
+        "razon_recomendacion": None,
+    }
 
 
 # ============================================================================
@@ -1053,7 +1213,30 @@ async def generar_brief(user_id: str, fecha_ref: datetime | None = None) -> Brie
     # 3. CLASIFICAR TAREAS EN SECCIONES 4-11
     usuario = USUARIOS_POR_USERNAME.get(user_id) or {}
     bitrix_uid = usuario.get("bitrix_user_id", 0)
+    webhook = usuario.get("webhook_bitrix", "")
     clasif = _clasificar_tareas(data["tareas"], bitrix_uid, dia)
+
+    # 3.5 SPRINT 4 — Enriquecer delegated_supervision con owner_nombre.
+    # Se hace despues de _clasificar_tareas porque necesitamos await, y
+    # esa funcion es sync. Resolucion via user.get cacheada; el bucle
+    # es cheap si el portal tiene <10 delegadas.
+    if webhook and clasif["delegated_supervision"]:
+        # Mapa id_tarea -> responsable_id nativo, tomado del set original.
+        resp_por_tarea: dict[int, int] = {}
+        for t in data["tareas"]:
+            if t.id is not None and t.responsable_id_bitrix:
+                resp_por_tarea[t.id] = t.responsable_id_bitrix
+
+        for item in clasif["delegated_supervision"]:
+            resp_id = resp_por_tarea.get(item.id)
+            if resp_id and resp_id != bitrix_uid:
+                # Owner externo — resolvemos nombre
+                nombre = await _resolver_owner_nombre(webhook, resp_id)
+                if nombre:
+                    item.owner_nombre = nombre
+            # Fallback: si sigue vacio y hay interlocutor, usamos ese
+            if not item.owner_nombre and item.primary_interlocutor:
+                item.owner_nombre = item.primary_interlocutor
 
     # 4. EXECUTIVE CONVERSATIONS
     conversaciones = _build_executive_conversations(data["tareas"], eventos_hoy_items)

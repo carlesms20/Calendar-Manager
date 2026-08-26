@@ -591,6 +591,7 @@ function KeyOutcomeCard({
 }
 
 function ConversacionCard({ conv }: { conv: ItemConversacion }) {
+  const recomBadge = _badgeRecomendacion(conv.recomendacion_asistencia);
   return (
     <div
       className="rounded-md border p-3"
@@ -632,6 +633,27 @@ function ConversacionCard({ conv }: { conv: ItemConversacion }) {
           </li>
         ))}
       </ul>
+
+      {/* Sprint 4 Bloque C - Meeting Delegation Rule §7.4 */}
+      {conv.recomendacion_asistencia !== "asistir" && (
+        <div
+          className="mt-2 flex items-center gap-2 rounded px-2 py-1.5 text-[11px]"
+          style={{
+            background: recomBadge.bg,
+            border: `1px solid ${recomBadge.border}`,
+          }}
+        >
+          <span style={{ color: recomBadge.color, fontWeight: 600 }}>
+            {recomBadge.label}
+          </span>
+          {conv.razon_recomendacion && (
+            <span style={{ color: "var(--color-text-muted)" }}>
+              {conv.razon_recomendacion}
+            </span>
+          )}
+        </div>
+      )}
+
       {conv.impacto_no_celebrarla && (
         <div
           className="mt-2 text-[11px]"
@@ -644,6 +666,37 @@ function ConversacionCard({ conv }: { conv: ItemConversacion }) {
   );
 }
 
+function _badgeRecomendacion(rec: string): {
+  label: string;
+  color: string;
+  bg: string;
+  border: string;
+} {
+  // Sprint 4 - Meeting Delegation Rule §7.4
+  if (rec === "delegar") {
+    return {
+      label: "💡 Puedes delegar esta reunión",
+      color: "var(--color-prio-baja)",
+      bg: "var(--color-prio-baja-soft)",
+      border: "var(--color-prio-baja)",
+    };
+  }
+  if (rec === "decidir_asincrono") {
+    return {
+      label: "💡 Decisión asíncrona posible",
+      color: "var(--color-prio-media)",
+      bg: "var(--color-prio-media-soft)",
+      border: "var(--color-prio-media)",
+    };
+  }
+  return {
+    label: "Asistir",
+    color: "var(--color-text-muted)",
+    bg: "var(--color-surface-hover)",
+    border: "var(--color-border)",
+  };
+}
+
 function ItemTareaRow({
   item,
   compacto,
@@ -654,6 +707,8 @@ function ItemTareaRow({
   const deadline = item.deadline ? _fechaCorta(item.deadline) : null;
   const followup = item.review_date ? _fechaCorta(item.review_date) : null;
   const followupVencido = item.razon?.includes("vencido");
+  const esWaiting = item.status_eos === "Waiting";
+  const esDelegated = item.status_eos === "Delegated";
 
   return (
     <div
@@ -671,7 +726,31 @@ function ItemTareaRow({
           >
             {item.title}
           </div>
-          {!compacto && item.next_action && (
+
+          {/* Sprint 4: Owner chip para delegadas */}
+          {esDelegated && item.owner_nombre && (
+            <div
+              className="mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]"
+              style={{
+                background: "var(--color-surface-hover)",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              👤 {item.owner_nombre}
+            </div>
+          )}
+
+          {/* Sprint 4: waiting_for como linea principal para Waiting */}
+          {esWaiting && item.waiting_for && (
+            <div
+              className="mt-1 text-xs"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              Esperando: {item.waiting_for}
+            </div>
+          )}
+
+          {!compacto && item.next_action && !esWaiting && (
             <div
               className="mt-1 text-xs"
               style={{ color: "var(--color-text-muted)" }}
@@ -679,6 +758,7 @@ function ItemTareaRow({
               → {item.next_action}
             </div>
           )}
+
           {item.razon && (
             <div
               className="mt-1 text-[11px]"
@@ -692,8 +772,31 @@ function ItemTareaRow({
               {item.razon}
             </div>
           )}
+
+          {/* Sprint 4: escalation_condition visible para delegadas */}
+          {!compacto && esDelegated && item.escalation_condition && (
+            <div
+              className="mt-1 text-[11px]"
+              style={{ color: "var(--color-prio-media)" }}
+              title="Escalation condition"
+            >
+              ⚡ {item.escalation_condition}
+            </div>
+          )}
         </div>
         <div className="flex flex-col items-end gap-0.5 text-[10px]">
+          {/* Sprint 4: badge dias_vencido para Waiting con follow-up pasado */}
+          {esWaiting && item.dias_vencido !== null && item.dias_vencido > 0 && (
+            <span
+              className="rounded-full px-2 py-0.5 font-mono"
+              style={{
+                background: "var(--color-prio-alta-soft)",
+                color: "var(--color-prio-alta)",
+              }}
+            >
+              +{item.dias_vencido}d
+            </span>
+          )}
           {deadline && (
             <span
               className="font-mono"

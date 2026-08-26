@@ -55,6 +55,10 @@ from tools import (
     actualizar_estado_tarea,
     proponer_consolidacion,
     crear_reunion_ejecutiva,
+    delegar_tarea,
+    marcar_waiting,
+    evaluar_delegacion,
+    follow_up_waiting,
 )
 
 load_dotenv()
@@ -115,6 +119,15 @@ Mapeo pregunta → tool:
   "delega esto a W" → crear_tarea.
 - "márcalo como delegado/hecho/cancelado", "esa tarea ya está en 
   progreso", "cámbiale el estado a W" → actualizar_estado_tarea.
+- "delega esto a X", "que X se encargue", "pasa la tarea Y a Z" (sobre 
+  tarea EXISTENTE) → delegar_tarea (Sprint 4, wrapper que fuerza los 
+  4 campos §7.2 obligatorios).
+- "envié X, marca como esperando respuesta", "queda pendiente de que 
+  Y me diga", "hasta que Z apruebe" → marcar_waiting.
+- "¿tengo que hacer yo esto?", "¿puedo delegar X?", "¿esto es para 
+  mí?" → evaluar_delegacion (diagnostica, no muta).
+- "¿qué estoy esperando?", "¿qué follow-ups tengo?", "¿hay algo 
+  vencido de lo que dejé pendiente?" → follow_up_waiting.
 - "qué tengo con X esta semana", "cómo llevo lo de Y", "todo lo pendiente 
   con Z", "puedo juntar todo esto en una reunión", "no será mejor una 
   sola reunión" → proponer_consolidacion (opcionalmente precedido de 
@@ -536,19 +549,72 @@ Casos:
   Preséntala al usuario y pregúntale cuál es. Vuelve a llamar con el 
   nombre más específico (nombre + apellido, o email).
 
-Al delegar en una misma llamada:
-- crear_tarea(title="...", owner="Sandra", status_eos="Delegated", 
-  expected_result="...", review_date="...", escalation_condition="...").
-- actualizar_estado_tarea(id=..., nuevo_estado="Delegated", 
-  owner="Sandra", expected_result="...", review_date="...", 
-  escalation_condition="...").
+## delegar_tarea vs actualizar_estado_tarea (Sprint 4)
 
-Cambiar owner SIN cambiar estado es un caso legítimo (reasignación 
-sin cambio de status): pasa solo el arg owner al actualizar. Cambiar 
-estado a Delegated SIN pasar owner es también válido si el usuario 
-no especifica a quién todavía — en ese caso la tarea queda Delegated 
-formalmente pero sigue asignada al CEO en Bitrix; añade un TODO en 
-next_action tipo "Pendiente: identificar responsable".
+Cuando el CEO dice "delega esto a X", "que X se encargue", "pasa esto 
+a X" sobre una tarea que YA EXISTE → usa `delegar_tarea` (NO 
+actualizar_estado_tarea). Es el wrapper que fuerza los 4 campos §7.2:
+owner, review_date, expected_result, escalation_condition.
+
+Si el usuario no ha dado alguno, PREGÚNTALE ANTES de llamar. La tool 
+devuelve error legible si falta cualquiera. Ejemplos de conversación 
+correcta:
+
+Usuario: "delega el informe Q4 a Sandra"
+Agente (antes de llamar):
+  "Voy a delegar el informe Q4 a Sandra. Necesito 3 cosas más:
+   - ¿Cuándo revisas el avance? (review_date)
+   - ¿Qué constituye 'informe hecho'? (expected_result)
+   - ¿Qué dispara escalación a ti? (escalation_condition)"
+Usuario: "reviso el 15, hecho = enviado al comité con datos Q4 verificados,
+         escala si no está el 20"
+Agente → delegar_tarea(id=..., owner="Sandra", review_date="2026-09-15",
+                       expected_result="Enviado al comité con datos Q4 verificados",
+                       escalation_condition="No entregado antes del 20")
+
+Casos donde SIGUE valiendo actualizar_estado_tarea:
+- Cambiar owner sin cambiar estado (reasignación).
+- Tarea que YA está Delegated y solo hay que ajustar algún campo.
+- Al crear tarea nueva delegada en un solo paso: usa crear_tarea con 
+  status_eos='Delegated' + los 4 campos §7.2 pasados como args.
+
+## marcar_waiting (Sprint 4)
+
+Cuando el CEO dice "envié X, espero respuesta", "queda pendiente a que 
+Y me diga", "hasta que Z apruebe", sobre una tarea existente → usa 
+`marcar_waiting`. Fuerza 2 campos: waiting_for (qué esperas y de 
+quién) y next_follow_up (cuándo volver a mirar).
+
+Ejemplo:
+Usuario: "envié el contrato a Sandra, marca como esperando respuesta"
+Agente: "¿Para cuándo esperas respuesta? Fijo next_follow_up ahí."
+Usuario: "una semana"
+Agente → marcar_waiting(id=..., waiting_for="Firma del contrato por Sandra",
+                        next_follow_up="2026-09-02T09:00:00+02:00")
+
+## evaluar_delegacion (Sprint 4)
+
+Cuando el CEO pregunta "¿tengo que hacer yo esto?", "¿puedo delegar 
+X?", "¿es para mí o para Sandra?" → llama a `evaluar_delegacion(tarea_id)`. 
+Es determinista: no cambia nada, solo diagnostica. Devuelve:
+- nivel_sugerido (1-5 según §7.1)
+- razones
+- campos que faltan para delegar
+- si la conversación puede evitarse
+- si alguien puede reemplazar al CEO
+
+Presenta el diagnóstico al usuario en lenguaje natural. Si dice 
+"vale, delega" y faltan campos, pregúntaselos y luego llama a 
+delegar_tarea.
+
+## follow_up_waiting (Sprint 4)
+
+Cuando el CEO pregunta "¿qué estoy esperando?", "¿qué follow-ups 
+tengo?", "¿hay algo vencido de las cosas que dejé pendientes?" → llama 
+a `follow_up_waiting()`. Sin argumentos. Devuelve dos listas: vencidos 
+y próximos (<=2 días). Cada item incluye una `next_action_sugerida` 
+concreta ("Recordar a Sandra"). Presenta lo vencido primero, ordenado 
+por días de retraso.
 
 # CONSULTAR TAREAS: SOLO ACTIVAS POR DEFECTO
 consultar_tareas por defecto excluye Completed y Cancelled. Esto es lo 
@@ -1426,6 +1492,100 @@ TOOLS_SCHEMA = [
                          "fecha_inicio"],
         },
     },
+
+    # ------------------------------------------------------------------
+    # SPRINT 4 — Delegation Model + Waiting Management (PHASE 1 §7)
+    # ------------------------------------------------------------------
+
+    {
+        "name": "delegar_tarea",
+        "description": (
+            "Delega una tarea a otro Owner con TODOS los campos obligatorios "
+            "de la delegacion (PHASE 1 §7.2). Wrapper sobre "
+            "actualizar_estado_tarea que exige los 4 campos criticos: "
+            "owner, review_date, expected_result, escalation_condition. "
+            "PREFIERE esta tool a actualizar_estado_tarea(nuevo_estado='Delegated') "
+            "cuando el usuario diga 'delega esto a X': asi te aseguras de no "
+            "olvidar ningun campo. Si el usuario no ha dado los 4, PREGUNTALE "
+            "antes de llamar. La tool devuelve error legible si falta alguno."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id":                    {"type": "integer", "description": "id Bitrix de la tarea"},
+                "owner":                 {"type": "string",  "description": "nombre/email de la persona a quien se delega"},
+                "review_date":           {"type": "string",  "description": "ISO 8601 fecha en que el CEO revisa avance"},
+                "expected_result":       {"type": "string",  "description": "criterio verificable de 'hecho'"},
+                "escalation_condition":  {"type": "string",  "description": "que dispara alarma / escalar al CEO"},
+                "preparation_required":  {"type": "string",  "description": "opcional. Que hay que preparar antes"},
+                "next_action_if_missed": {"type": "string",  "description": "opcional. Que se hace si vence sin resolver"},
+                "deadline":              {"type": "string",  "description": "opcional. ISO 8601 fecha limite real de entrega"},
+                "next_action":           {"type": "string",  "description": "opcional. Proximo paso concreto del Owner"},
+            },
+            "required": ["id", "owner", "review_date", "expected_result",
+                         "escalation_condition"],
+        },
+    },
+
+    {
+        "name": "marcar_waiting",
+        "description": (
+            "Marca una tarea como Waiting (esperando respuesta externa) con "
+            "los 2 campos obligatorios. waiting_for describe QUE se espera y "
+            "de QUIEN. next_follow_up es cuando el sistema recordara el "
+            "asunto en el brief si no se ha resuelto. PREFIERE esta tool a "
+            "actualizar_estado_tarea(nuevo_estado='Waiting') para no "
+            "dejar Waiting sin follow-up (invisible en el brief)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id":                    {"type": "integer"},
+                "waiting_for":           {"type": "string", "description": "que se espera y de quien. Ej: 'firma del contrato por Sandra'"},
+                "next_follow_up":        {"type": "string", "description": "ISO 8601 fecha para volver a levantar el asunto"},
+                "next_action_if_missed": {"type": "string", "description": "opcional. Que hacer si vence sin respuesta"},
+            },
+            "required": ["id", "waiting_for", "next_follow_up"],
+        },
+    },
+
+    {
+        "name": "evaluar_delegacion",
+        "description": (
+            "Analiza una tarea existente y devuelve el nivel MINIMO SUFICIENTE "
+            "de participacion del CEO segun el Delegation Decision Test "
+            "(PHASE 1 §7.3). Deterministico, no llama al LLM ni cambia nada "
+            "en Bitrix. Devuelve nivel sugerido (1-5), razones, y que "
+            "campos faltan para poder delegar segun §7.2. Usa esto cuando "
+            "el CEO pregunte 'tengo que hacer yo esto?', 'puedo delegar X?' "
+            "o cuando quieras aconsejar delegar antes de ejecutar. "
+            "Tras la evaluacion, si procede, llama a delegar_tarea con los "
+            "campos completos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tarea_id": {"type": "integer"},
+            },
+            "required": ["tarea_id"],
+        },
+    },
+
+    {
+        "name": "follow_up_waiting",
+        "description": (
+            "Lista tareas Waiting con follow-up vencido o proximo (<=2 dias). "
+            "Cada item incluye dias_vencido, waiting_for y next_action "
+            "sugerida (ej: 'Recordar a Sandra'). Usa esto cuando el CEO "
+            "pregunte 'que estoy esperando?', 'que follow-ups tengo?', "
+            "'hay algo vencido?', o al principio del dia sin brief. "
+            "Deterministica, sin LLM."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 # Cache breakpoint en la ultima tool: cachea todo el bloque tools.
@@ -1450,6 +1610,10 @@ _TOOLS_ASYNC = {
     "actualizar_estado_tarea": actualizar_estado_tarea,
     "proponer_consolidacion": proponer_consolidacion,
     "crear_reunion_ejecutiva": crear_reunion_ejecutiva,
+    "delegar_tarea": delegar_tarea,
+    "marcar_waiting": marcar_waiting,
+    "evaluar_delegacion": evaluar_delegacion,
+    "follow_up_waiting": follow_up_waiting,
 }
 
 

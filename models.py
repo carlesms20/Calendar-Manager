@@ -246,6 +246,12 @@ class Tarea(BaseModel):
     # para el brief. Ver models.py STATUS_BITRIX_ACTIVO.
     status_bitrix_nativo: int | None = None
 
+    # RESPONSIBLE_ID nativo Bitrix (Sprint 4). Sirve para resolver el
+    # nombre del Owner en el Brief via user.get. Lo tratamos como
+    # metadata inmutable (no lo modifica el LLM directamente; se usa
+    # actualizar_estado_tarea o crear_tarea con arg owner=str).
+    responsable_id_bitrix: int | None = None
+
     # --- UF_* Estado y clasificacion ---
     status_eos: EstadoEOS | None = None
     task_type: TipoTarea | None = None
@@ -262,6 +268,17 @@ class Tarea(BaseModel):
     expected_result: str | None = None
     review_date: datetime | None = None
     source: str | None = None
+
+    # --- UF_* Delegacion (Sprint 4, PHASE 1 §7.2) ---
+    # preparation_required: que hay que preparar ANTES de que el CEO se
+    #   involucre. §7.5 delega la preparacion cuando puede hacerse sin
+    #   el CEO. Ej: "recopilar precios de 3 competidores", "presupuesto
+    #   marketing Q4 con desglose por canal".
+    # next_action_if_missed: que se hace si vence el deadline sin
+    #   resolucion. §7.2 lo pide explicitamente para delegaciones.
+    #   Ej: "escalar a CEO", "renegociar deadline con owner".
+    preparation_required: str | None = None
+    next_action_if_missed: str | None = None
 
     # --- UF_* Riesgo y control ---
     risk: str | None = None
@@ -365,6 +382,8 @@ class Tarea(BaseModel):
             "expected_result":       s(self.expected_result),
             "review_date":           s(self.review_date),
             "source":                s(self.source),
+            "preparation_required":  s(self.preparation_required),
+            "next_action_if_missed": s(self.next_action_if_missed),
             "risk":                  s(self.risk),
             "escalation_condition":  s(self.escalation_condition),
             "requires_conversation": s(self.requires_conversation),

@@ -51,6 +51,12 @@ CAMPOS_TAREA_EOS: list[dict] = [
     {"FIELD_NAME": "UF_SOURCE",               "USER_TYPE_ID": "string",   "LABEL": "Source",
      "EDIT_FORM_LABEL": {"en": "Source",               "es": "Fuente"},                      "SORT": 160},
 
+    # --- Delegacion (Sprint 4, PHASE 1 §7.2) ---
+    {"FIELD_NAME": "UF_PREPARATION_REQUIRED", "USER_TYPE_ID": "string",   "LABEL": "Preparation Required",
+     "EDIT_FORM_LABEL": {"en": "Preparation Required", "es": "Preparacion requerida"},        "SORT": 165},
+    {"FIELD_NAME": "UF_NEXT_ACTION_IF_MISSED", "USER_TYPE_ID": "string",  "LABEL": "Next Action If Missed",
+     "EDIT_FORM_LABEL": {"en": "Next Action If Missed", "es": "Accion si vence sin resolver"},"SORT": 167},
+
     # --- Riesgo y control (170-189) ---
     {"FIELD_NAME": "UF_RISK",                 "USER_TYPE_ID": "string",   "LABEL": "Risk",
      "EDIT_FORM_LABEL": {"en": "Risk",                 "es": "Riesgo"},                      "SORT": 170},

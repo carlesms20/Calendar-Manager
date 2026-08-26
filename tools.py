@@ -816,6 +816,8 @@ async def crear_tarea(
     source: str | None = "Bitrix24",
     risk: str | None = None,
     escalation_condition: str | None = None,
+    preparation_required: str | None = None,
+    next_action_if_missed: str | None = None,
     requires_conversation: bool | None = None,
     primary_interlocutor: str | None = None,
     conversation_purpose: str | None = None,
@@ -905,6 +907,8 @@ async def crear_tarea(
             source=source or None,
             risk=risk or None,
             escalation_condition=escalation_condition or None,
+            preparation_required=preparation_required or None,
+            next_action_if_missed=next_action_if_missed or None,
             requires_conversation=requires_conversation,
             primary_interlocutor=primary_interlocutor or None,
             conversation_purpose=conversation_purpose or None,
@@ -1055,6 +1059,8 @@ async def actualizar_estado_tarea(
     review_date: datetime | None = None,
     deadline: datetime | None = None,
     escalation_condition: str | None = None,
+    preparation_required: str | None = None,
+    next_action_if_missed: str | None = None,
 ) -> dict:
     """Cambia el status_eos de una tarea y, en la misma llamada,
     actualiza campos asociados y opcionalmente el owner.
@@ -1134,6 +1140,10 @@ async def actualizar_estado_tarea(
         cambios["deadline"] = deadline
     if escalation_condition is not None:
         cambios["escalation_condition"] = escalation_condition
+    if preparation_required is not None:
+        cambios["preparation_required"] = preparation_required
+    if next_action_if_missed is not None:
+        cambios["next_action_if_missed"] = next_action_if_missed
 
     # --- Update en Bitrix (con RESPONSIBLE_ID aparte si aplica) ---
     try:
@@ -1610,3 +1620,347 @@ async def crear_reunion_ejecutiva(
         f"Total pendientes: {resultado.get('operaciones_pendientes_total', '?')}."
     )
     return resultado
+
+# ============================================================================
+# SPRINT 4 — Delegation Model + Waiting Management (PHASE 1 §7)
+# ============================================================================
+# Las 4 tools de este bloque son THIN WRAPPERS sobre actualizar_estado_tarea
+# + logica derivada. No reinventan la rueda: fuerzan los campos obligatorios
+# de §7.2, aplican el Delegation Decision Test §7.3 y consumen datos ya
+# calculados. La delegacion real ocurre en actualizar_estado_tarea.
+
+
+async def delegar_tarea(
+    user_id: str,
+    id: int,
+    owner: str,
+    review_date: datetime,
+    expected_result: str,
+    escalation_condition: str,
+    preparation_required: str | None = None,
+    next_action_if_missed: str | None = None,
+    deadline: datetime | None = None,
+    next_action: str | None = None,
+) -> dict:
+    """Delegar una tarea a otro Owner con los campos obligatorios de
+    delegacion (§7.2). Wrapper sobre actualizar_estado_tarea que
+    fuerza los 4 campos criticos: owner, review_date, expected_result,
+    escalation_condition.
+
+    Si falta cualquiera de los 4, la tool devuelve error legible ANTES
+    de tocar Bitrix. El agente debe preguntar al usuario y volver a
+    llamar con los datos completos.
+
+    Sin esta tool: el agente puede llamar a actualizar_estado_tarea con
+    nuevo_estado='Delegated' y omitir review_date, quedando la tarea
+    delegada sin fecha de control — invisible en el Brief hasta que sea
+    tarde. §7.2 lo prohibe explicitamente.
+    """
+    print(f"TOOL[{user_id}]: delegar_tarea id={id} owner={owner!r} "
+          f"review={review_date} escala={escalation_condition[:30] if escalation_condition else None!r}")
+
+    # Validacion antes de tocar Bitrix. Errores legibles para que el
+    # LLM sepa exactamente que preguntar al usuario.
+    faltas: list[str] = []
+    if not owner or not owner.strip():
+        faltas.append("owner (a quien se delega)")
+    if not review_date:
+        faltas.append("review_date (cuando revisas el avance)")
+    if not expected_result or not expected_result.strip():
+        faltas.append("expected_result (que constituye 'hecho')")
+    if not escalation_condition or not escalation_condition.strip():
+        faltas.append("escalation_condition (que dispara alarma)")
+
+    if faltas:
+        return {
+            "ok": False,
+            "mensaje": (
+                f"Para delegar la tarea {id} falta: {', '.join(faltas)}. "
+                f"PHASE 1 §7.2 los exige. Preguntale al usuario antes de "
+                f"volver a llamar."
+            ),
+            "campos_faltantes": faltas,
+        }
+
+    # Delegar: transicion -> Delegated + campos completos.
+    return await actualizar_estado_tarea(
+        user_id=user_id,
+        id=id,
+        nuevo_estado="Delegated",
+        owner=owner,
+        review_date=review_date,
+        expected_result=expected_result,
+        escalation_condition=escalation_condition,
+        preparation_required=preparation_required,
+        next_action_if_missed=next_action_if_missed,
+        deadline=deadline,
+        next_action=next_action,
+    )
+
+
+async def marcar_waiting(
+    user_id: str,
+    id: int,
+    waiting_for: str,
+    next_follow_up: datetime,
+    next_action_if_missed: str | None = None,
+) -> dict:
+    """Marcar una tarea como Waiting (esperando respuesta externa).
+    Wrapper que fuerza los 2 campos criticos: descripcion de que se
+    espera y cuando hacer el proximo follow-up.
+
+    'waiting_for' se guarda en expected_result (natural para el brief:
+    "espero X de Y"). 'next_follow_up' se guarda en review_date
+    (fecha en que el sistema volvera a levantar el asunto en el brief
+    si no se ha resuelto).
+
+    Sin esto: el LLM pone nuevo_estado='Waiting' sin next_follow_up y
+    la tarea queda en un limbo del que el brief no la saca nunca. §12
+    Missing Information lo detectaria, pero preferimos prevenir.
+    """
+    print(f"TOOL[{user_id}]: marcar_waiting id={id} waiting_for={waiting_for[:40]!r} "
+          f"next_follow_up={next_follow_up}")
+
+    faltas: list[str] = []
+    if not waiting_for or not waiting_for.strip():
+        faltas.append("waiting_for (que se espera y de quien)")
+    if not next_follow_up:
+        faltas.append("next_follow_up (cuando volver a mirar)")
+
+    if faltas:
+        return {
+            "ok": False,
+            "mensaje": (
+                f"Para marcar {id} como Waiting falta: {', '.join(faltas)}. "
+                f"Preguntale al usuario y vuelve a llamar."
+            ),
+            "campos_faltantes": faltas,
+        }
+
+    return await actualizar_estado_tarea(
+        user_id=user_id,
+        id=id,
+        nuevo_estado="Waiting",
+        expected_result=waiting_for.strip(),
+        review_date=next_follow_up,
+        next_action_if_missed=next_action_if_missed,
+    )
+
+
+async def evaluar_delegacion(user_id: str, tarea_id: int) -> dict:
+    """Aplica el Delegation Decision Test §7.3 a una tarea existente y
+    devuelve un diagnostico DETERMINISTA con nivel sugerido, razones y
+    campos que faltan para poder delegarla.
+
+    NO delega automaticamente. Solo devuelve el analisis para que el
+    LLM lo cuente al usuario y este decida.
+
+    Nivel sugerido segun §7.1:
+      1 CEO Execution     - CEO ejecuta personalmente (competencias unicas)
+      2 CEO Decision      - equipo prepara, CEO decide
+      3 CEO Approval      - equipo ejecuta, CEO aprueba
+      4 CEO Supervision   - delegado, CEO recibe KPI/desviaciones
+      5 No CEO Involvement - Owner ejecuta y cierra
+
+    Heuristica (deterministica, sin LLM):
+      - alexander_role=Execution + task_type=Project -> Nivel 1
+      - alexander_role=Decision -> Nivel 2
+      - alexander_role=Approval -> Nivel 3
+      - alexander_role=Supervision -> Nivel 4
+      - alexander_role=No Involvement -> Nivel 5
+      - Sin alexander_role: heuristica por otros campos
+    """
+    print(f"TOOL[{user_id}]: evaluar_delegacion id={tarea_id}")
+
+    try:
+        webhook, _ = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    from bitrix_tasks import obtener_tarea
+    try:
+        tarea = await obtener_tarea(webhook, tarea_id)
+    except Exception as e:
+        return {"ok": False,
+                "mensaje": f"No pude leer la tarea {tarea_id}: {type(e).__name__}: {e}"}
+
+    if not tarea:
+        return {"ok": False, "mensaje": f"Tarea {tarea_id} no existe."}
+
+    # --- Determinar nivel sugerido ---
+    from models import RolAlexander, TipoTarea, EstadoEOS
+
+    nivel_num: int
+    nivel_txt: str
+    razones: list[str] = []
+
+    role = tarea.alexander_role
+    if role == RolAlexander.EXECUTION:
+        if tarea.task_type == TipoTarea.PROJECT:
+            nivel_num, nivel_txt = 1, "CEO Execution"
+            razones.append("alexander_role=Execution en un Project: requiere criterio propio del CEO.")
+        else:
+            nivel_num, nivel_txt = 1, "CEO Execution"
+            razones.append("alexander_role=Execution: la tarea esta marcada como trabajo directo del CEO.")
+    elif role == RolAlexander.DECISION:
+        nivel_num, nivel_txt = 2, "CEO Decision"
+        razones.append("alexander_role=Decision: el equipo puede preparar contexto; el CEO decide.")
+    elif role == RolAlexander.APPROVAL:
+        nivel_num, nivel_txt = 3, "CEO Approval"
+        razones.append("alexander_role=Approval: el equipo ejecuta; el CEO aprueba el resultado.")
+    elif role == RolAlexander.SUPERVISION:
+        nivel_num, nivel_txt = 4, "CEO Supervision"
+        razones.append("alexander_role=Supervision: trabajo delegado; el CEO recibe reportes.")
+    elif role == RolAlexander.NO_INVOLVEMENT:
+        nivel_num, nivel_txt = 5, "No CEO Involvement"
+        razones.append("alexander_role=No Involvement: el Owner ejecuta y cierra autonomamente.")
+    else:
+        # Sin rol asignado — inferir por otros campos
+        if tarea.requires_conversation and tarea.expected_decision:
+            nivel_num, nivel_txt = 2, "CEO Decision"
+            razones.append(
+                "Sin alexander_role, pero requires_conversation=True + "
+                "expected_decision presente sugiere Decision."
+            )
+        elif tarea.status_eos == EstadoEOS.DELEGATED:
+            nivel_num, nivel_txt = 4, "CEO Supervision"
+            razones.append(
+                "Sin alexander_role, pero status=Delegated implica al menos supervision."
+            )
+        else:
+            nivel_num, nivel_txt = 3, "CEO Approval"
+            razones.append(
+                "Sin alexander_role ni pistas fuertes: por defecto sugiero Approval "
+                "(el equipo puede ejecutar y el CEO revisa)."
+            )
+
+    # --- Campos faltantes para poder delegar (§7.2) ---
+    campos_faltantes: list[str] = []
+    if nivel_num >= 3:  # A partir de Approval ya hay delegacion
+        if not tarea.expected_result:
+            campos_faltantes.append("expected_result")
+        if not tarea.deadline:
+            campos_faltantes.append("deadline")
+        if nivel_num >= 4:  # Supervision o superior — necesita mas
+            if not tarea.review_date:
+                campos_faltantes.append("review_date")
+            if not tarea.escalation_condition:
+                campos_faltantes.append("escalation_condition")
+
+    # --- Puede evitarse la conversacion? §7.4 ---
+    puede_evitarse_conv = (
+        nivel_num >= 3
+        and tarea.expected_result is not None
+        and tarea.deadline is not None
+    )
+
+    # --- Puede otro reemplazar al CEO en la conversacion? §7.4 ---
+    alguien_puede_reemplazarlo = nivel_num >= 4
+
+    return {
+        "ok": True,
+        "id": tarea_id,
+        "title": tarea.title,
+        "nivel_sugerido_num": nivel_num,
+        "nivel_sugerido": nivel_txt,
+        "razones": razones,
+        "campos_faltantes_para_delegar": campos_faltantes,
+        "puede_evitarse_conversacion": puede_evitarse_conv,
+        "alguien_puede_reemplazarlo": alguien_puede_reemplazarlo,
+        "mensaje": (
+            f"Tarea {tarea_id} '{tarea.title[:40]}': sugerido {nivel_txt}. "
+            + (f"Faltan campos: {', '.join(campos_faltantes)}. "
+               if campos_faltantes else "Lista para delegar.")
+        ),
+    }
+
+
+async def follow_up_waiting(user_id: str) -> dict:
+    """Lista tareas en estado Waiting con review_date (next_follow_up)
+    vencido. Devuelve items con dias_vencido, waiting_for y una
+    next_action sugerida deterministica.
+
+    El brief la usa para poblar la seccion "Waiting for Responses" con
+    llamada a la accion concreta. El LLM la puede invocar tambien on-demand:
+    "que estoy esperando?" -> la muestra ordenada por urgencia.
+    """
+    print(f"TOOL[{user_id}]: follow_up_waiting")
+
+    try:
+        webhook, bitrix_uid = _contexto_bitrix(user_id)
+    except ValueError as e:
+        return {"ok": False, "mensaje": str(e)}
+
+    from bitrix_tasks import listar_tareas
+    from models import EstadoEOS, TZ_LOCAL
+
+    try:
+        tareas = await listar_tareas(
+            webhook, filtro={"RESPONSIBLE_ID": bitrix_uid},
+        )
+    except Exception as e:
+        return {"ok": False,
+                "mensaje": f"Error listando tareas: {type(e).__name__}: {e}"}
+
+    ahora = datetime.now(TZ_LOCAL)
+    vencidos: list[dict] = []
+    proximos: list[dict] = []
+
+    for t in tareas:
+        if t.status_eos != EstadoEOS.WAITING:
+            continue
+        if not t.review_date:
+            # Waiting sin next_follow_up: es una anomalia que §12
+            # reporta como Missing Information. Aqui la incluimos con
+            # marca especial para que el LLM la pueda mencionar.
+            vencidos.append({
+                "id": t.id,
+                "title": t.title,
+                "waiting_for": t.expected_result or "[NO DATA]",
+                "dias_vencido": None,
+                "sin_follow_up": True,
+                "next_action_sugerida": (
+                    f"Fijar next_follow_up y decidir a quien recordar."
+                ),
+                "primary_interlocutor": t.primary_interlocutor,
+            })
+            continue
+
+        dias_diff = (t.review_date - ahora).days
+        item = {
+            "id": t.id,
+            "title": t.title,
+            "waiting_for": t.expected_result or "[NO DATA]",
+            "next_follow_up": t.review_date.isoformat(),
+            "dias_vencido": -dias_diff if dias_diff < 0 else 0,
+            "dias_hasta": dias_diff if dias_diff > 0 else 0,
+            "primary_interlocutor": t.primary_interlocutor,
+            "sin_follow_up": False,
+        }
+
+        # Sugerir accion segun quien es el interlocutor
+        interlocutor = t.primary_interlocutor
+        if interlocutor:
+            item["next_action_sugerida"] = f"Recordar a {interlocutor}"
+        else:
+            item["next_action_sugerida"] = "Enviar recordatorio (sin destinatario claro)"
+
+        if dias_diff < 0:
+            vencidos.append(item)
+        elif dias_diff <= 2:
+            proximos.append(item)
+
+    vencidos.sort(key=lambda x: x.get("dias_vencido") or 0, reverse=True)
+    proximos.sort(key=lambda x: x.get("dias_hasta") or 0)
+
+    return {
+        "ok": True,
+        "n_vencidos": len(vencidos),
+        "n_proximos": len(proximos),
+        "vencidos": vencidos,
+        "proximos": proximos,
+        "mensaje": (
+            f"{len(vencidos)} Waiting vencido(s), "
+            f"{len(proximos)} vence(n) en <=2 dias."
+        ),
+    }
