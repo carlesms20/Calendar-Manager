@@ -273,6 +273,16 @@ def bitrix_dict_a_tarea(raw: dict) -> Tarea:
         "title": str(d.get("TITLE") or ""),
     }
 
+    # STATUS nativo Bitrix (campo STATUS, entero). Fallback para
+    # solo_activos cuando UF_STATUS_EOS esta vacio. Ver
+    # models.STATUS_BITRIX_ACTIVO.
+    st_raw = d.get("STATUS")
+    if st_raw not in (None, ""):
+        try:
+            kwargs["status_bitrix_nativo"] = int(st_raw)
+        except (TypeError, ValueError):
+            kwargs["status_bitrix_nativo"] = None
+
     # DEADLINE nativo Bitrix. Lo parseamos aparte de los UF_ porque no
     # vive en _CAMPOS_UF. Si Bitrix lo devuelve "" o null, deadline=None.
     dl_raw = d.get("DEADLINE")

@@ -648,8 +648,26 @@ async def listar_tareas_endpoint(
     if estado_filter is not None:
         tareas = [t for t in tareas if t.status_eos == estado_filter]
     elif solo_activos:
+        # solo_activos combina dos fuentes de verdad para no dejar
+        # tareas fantasma en el listado (bug Sprint 3.5, ver fix B):
+        #   - Si status_eos esta puesto: excluir terminales EOS.
+        #   - Si status_eos es None (tareas legacy sin UF_STATUS_EOS):
+        #     mirar el STATUS nativo Bitrix. Solo consideramos activas
+        #     las que Bitrix tambien considera "In progress" (statuses
+        #     1/2/3). Awaiting control (4), Completed (5), Deferred (6)
+        #     y Almost done (7) se filtran fuera.
+        #   - Si tampoco tenemos STATUS nativo: incluimos por defecto
+        #     para no ocultar trabajo (PHASE 1 §1.2). Deberia ser
+        #     rarisimo, es fallback del fallback.
+        from models import STATUS_BITRIX_ACTIVO
         terminales = {EstadoEOS.COMPLETED, EstadoEOS.CANCELLED}
-        tareas = [t for t in tareas if t.status_eos not in terminales]
+        def _es_activa(t) -> bool:
+            if t.status_eos is not None:
+                return t.status_eos not in terminales
+            if t.status_bitrix_nativo is not None:
+                return t.status_bitrix_nativo in STATUS_BITRIX_ACTIVO
+            return True  # sin ninguna senyal, no ocultamos
+        tareas = [t for t in tareas if _es_activa(t)]
 
     if task_type:
         tareas = [t for t in tareas if t.task_type and t.task_type.value == task_type]

@@ -501,7 +501,24 @@ def _clasificar_tareas(
 
     Regla clave §4.6: los elementos menos prioritarios se CONSERVAN en
     Not Today o Remaining Inventory, nunca desaparecen.
+
+    Filtrado previo: tareas cerradas o aplazadas en Bitrix nativo pero
+    sin UF_STATUS_EOS rellenado (tareas legacy anteriores al agente)
+    NO deben inflar el inventario. Bug detectado Sprint 3.5: sin este
+    filtro, el brief mostraba 27 tareas mientras que Bitrix UI mostraba
+    8 activas. Fuente de verdad: STATUS nativo cuando no hay EOS.
     """
+    from models import STATUS_BITRIX_ACTIVO
+
+    def _es_activa_para_brief(t: Tarea) -> bool:
+        if t.status_eos is not None:
+            return t.status_eos not in (EstadoEOS.COMPLETED, EstadoEOS.CANCELLED)
+        if t.status_bitrix_nativo is not None:
+            return t.status_bitrix_nativo in STATUS_BITRIX_ACTIVO
+        return True  # sin señal, no ocultar (PHASE 1 §1.2)
+
+    tareas = [t for t in tareas if _es_activa_para_brief(t)]
+
     ahora = datetime.now(TZ_LOCAL)
     limite_hoy = dia + timedelta(days=1)
     limite_3d = dia + timedelta(days=3)
@@ -609,11 +626,16 @@ def _build_executive_conversations(
 
     §4.5: mostrar una consolidada, no lista de tareas independientes.
     """
+    from models import STATUS_BITRIX_ACTIVO
     grupos: dict[str, list[Tarea]] = {}
     for t in tareas:
         if not t.requires_conversation:
             continue
         if t.status_eos in (EstadoEOS.COMPLETED, EstadoEOS.CANCELLED):
+            continue
+        # Fallback nativo Bitrix (Sprint 3.5 fix B)
+        if t.status_eos is None and t.status_bitrix_nativo is not None \
+                and t.status_bitrix_nativo not in STATUS_BITRIX_ACTIVO:
             continue
         interlocutor = (t.primary_interlocutor or "").strip()
         if not interlocutor:
@@ -727,10 +749,21 @@ def _categoria_bloque(minutos: int) -> str:
 def _build_missing_information(tareas: list[Tarea]) -> list[str]:
     """Sec 12. Lista concreta de campos obligatorios faltantes.
     §4.6: [NO DATA] explicito allí donde falte info obligatoria.
+
+    Aplica el mismo filtro activo/nativo que _clasificar_tareas para
+    no bombardear con "sin next_action" 20 tareas legacy cerradas en
+    Bitrix (Sprint 3.5 fix B).
     """
+    from models import STATUS_BITRIX_ACTIVO
     faltas: list[str] = []
     for t in tareas:
+        # Filtrar terminales EOS
         if t.status_eos in (EstadoEOS.COMPLETED, EstadoEOS.CANCELLED):
+            continue
+        # Fallback: tareas legacy sin UF_STATUS_EOS pero con STATUS
+        # nativo cerrado/aplazado.
+        if t.status_eos is None and t.status_bitrix_nativo is not None \
+                and t.status_bitrix_nativo not in STATUS_BITRIX_ACTIVO:
             continue
         prefix = f"Tarea {t.id} ('{t.title[:40]}')"
 

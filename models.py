@@ -138,6 +138,26 @@ STATUS_BITRIX_POR_EOS: dict[EstadoEOS, int] = {
     EstadoEOS.CANCELLED:   5,  # Sin equivalente nativo; ver comentario arriba
 }
 
+# Conjunto de STATUS nativos de Bitrix que consideramos "activos" cuando
+# UF_STATUS_EOS esta vacio (tareas legacy creadas antes de que existiera
+# el EOS, o creadas manualmente en Bitrix sin pasar por el agente).
+#
+# Diseño alineado con la vista "In progress" del Bitrix UI:
+#   1 = Pending (nativo Bitrix)
+#   2 = Waiting for execution
+#   3 = In progress
+# se consideran ACTIVAS. Se excluyen:
+#   4 = Awaiting control  (Bitrix las oculta de "In progress")
+#   5 = Completed         (terminal)
+#   6 = Deferred          (aplazada, Bitrix las oculta)
+#   7 = Almost done       (ambiguo; excluir es lo conservador)
+#
+# Sin este set, el filtro `solo_activos` mostraba 27 tareas cuando
+# Bitrix UI mostraba 8, porque cualquier tarea con status_eos=None
+# pasaba el check `not in {COMPLETED, CANCELLED}` aunque su STATUS
+# nativo fuera 4/5/6 y estuviera efectivamente cerrada o aplazada.
+STATUS_BITRIX_ACTIVO: set[int] = {1, 2, 3}
+
 class Evento(BaseModel):
     """Evento de calendario que se sincroniza con Bitrix (calendar.event.add).
 
@@ -211,6 +231,20 @@ class Tarea(BaseModel):
     # --- Nativos de Bitrix ---
     id: int | None = None                 # None hasta que Bitrix lo asigna
     title: str
+
+    # STATUS nativo de Bitrix (campo STATUS, entero 1..7). Fallback para
+    # decidir si una tarea legacy sin UF_STATUS_EOS es o no activa
+    # (ver TAREA_ES_ACTIVA_POR_STATUS_BITRIX abajo). Convivimos con dos
+    # fuentes de verdad:
+    #   1. UF_STATUS_EOS: fuente EOS canonica (los 8 estados de PHASE 1
+    #      §6.1). Puede estar vacio para tareas creadas por Bitrix
+    #      directamente sin pasar por el agente.
+    #   2. STATUS nativo: siempre presente. Bitrix lo llena con su
+    #      propio ciclo de vida (Pending, In Progress, Completed,
+    #      Deferred, Awaiting control, Declined, Disapproved).
+    # Cuando (1) esta vacio, (2) manda para el filtro solo_activos y
+    # para el brief. Ver models.py STATUS_BITRIX_ACTIVO.
+    status_bitrix_nativo: int | None = None
 
     # --- UF_* Estado y clasificacion ---
     status_eos: EstadoEOS | None = None
