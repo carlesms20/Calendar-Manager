@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FileText, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import Chat from "../components/Chat";
 import Composer from "../components/Composer";
 import FocusDelDia from "../components/FocusDelDia";
