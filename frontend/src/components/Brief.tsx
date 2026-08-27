@@ -6,6 +6,8 @@ import type {
   ItemConversacion,
   ItemCalendario,
   IntegrityFinding,
+  ReminderItem,
+  BloquePropuesto,
 } from "../lib/types";
 
 interface Props {
@@ -274,22 +276,118 @@ function ContenidoBrief({ brief }: { brief: BriefEjecutivo }) {
         </Seccion>
       )}
 
-      {/* 9. Proposed Work Blocks */}
-      {brief.proposed_work_blocks.length > 0 && (
-        <Seccion titulo="Bloques de trabajo disponibles" icono={<Clock size={14} />}>
-          <ul className="space-y-1">
-            {brief.proposed_work_blocks.map((b, i) => (
-              <li
-                key={i}
-                className="text-sm"
-                style={{ color: "var(--color-text-muted)" }}
-              >
-                <ChevronRight size={12} className="mr-1 inline" /> {b}
-              </li>
+      {/* Sprint 5 - Reminders priorizados §13. Va justo despues de key
+          outcomes: son las alertas de accion inmediata. */}
+      {brief.reminders.length > 0 && (
+        <Seccion
+          titulo={`Recordatorios (${brief.reminders.length})`}
+          icono={<AlertTriangle size={14} />}
+          tono={brief.reminders.some((r) => r.prioridad_num <= 2) ? "alta" : "media"}
+        >
+          <div className="space-y-2">
+            {brief.reminders.slice(0, 8).map((r, i) => (
+              <ReminderRow key={i} reminder={r} />
             ))}
-          </ul>
+          </div>
         </Seccion>
       )}
+
+      {/* 9. Proposed Work Blocks — Sprint 5 estructurados */}
+      {brief.proposed_work_blocks.length > 0 && (
+        <Seccion
+          titulo={
+            brief.capacidad_hoy && !brief.capacidad_hoy.tiene_bloque_estrategico
+              ? "Bloques propuestos (sin ventana estratégica)"
+              : "Bloques propuestos para hoy"
+          }
+          icono={<Clock size={14} />}
+        >
+          <div className="space-y-2">
+            {brief.proposed_work_blocks.map((b, i) => (
+              <BloqueRow key={i} bloque={b} />
+            ))}
+          </div>
+          {brief.capacidad_hoy && (
+            <div
+              className="mt-2 text-[11px]"
+              style={{ color: "var(--color-text-faint)" }}
+            >
+              {brief.capacidad_hoy.libre_min} min libres · buffer{" "}
+              {brief.capacidad_hoy.buffer_pct}%
+            </div>
+          )}
+        </Seccion>
+      )}
+
+      {/* Sprint 5 - Forecast próxima semana (§14) */}
+      {brief.forecast_proxima_semana &&
+        brief.forecast_proxima_semana.riesgos.length > 0 && (
+          <Seccion
+            titulo="Semana que viene"
+            icono={<AlertTriangle size={14} />}
+            tono={
+              brief.forecast_proxima_semana.riesgos.some(
+                (r) => r.severidad === "alta",
+              )
+                ? "alta"
+                : "media"
+            }
+          >
+            <div className="mb-2 flex items-center gap-3 text-xs">
+              <span style={{ color: "var(--color-text-muted)" }}>
+                Ratio de carga:
+              </span>
+              <span
+                className="font-mono"
+                style={{
+                  color:
+                    brief.forecast_proxima_semana.ratio_carga > 1.0
+                      ? "var(--color-prio-alta)"
+                      : brief.forecast_proxima_semana.ratio_carga > 0.85
+                      ? "var(--color-prio-media)"
+                      : "var(--color-text)",
+                }}
+              >
+                {Math.round(brief.forecast_proxima_semana.ratio_carga * 100)}%
+              </span>
+              <span style={{ color: "var(--color-text-faint)" }}>·</span>
+              <span style={{ color: "var(--color-text-muted)" }}>
+                {brief.forecast_proxima_semana.n_deadlines_esa_semana} deadlines
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {brief.forecast_proxima_semana.riesgos.map((r, i) => (
+                <div
+                  key={i}
+                  className="rounded-md border px-2 py-1.5 text-xs"
+                  style={{
+                    background: "var(--color-surface)",
+                    borderColor:
+                      r.severidad === "alta"
+                        ? "var(--color-prio-alta)"
+                        : "var(--color-border)",
+                  }}
+                >
+                  <span
+                    className="uppercase text-[9px] mr-2"
+                    style={{
+                      color:
+                        r.severidad === "alta"
+                          ? "var(--color-prio-alta)"
+                          : "var(--color-prio-media)",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {r.severidad}
+                  </span>
+                  <span style={{ color: "var(--color-text)" }}>
+                    {r.descripcion}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </Seccion>
+        )}
 
       {/* 10. Not Today */}
       {brief.not_today.length > 0 && (
@@ -948,6 +1046,152 @@ function BloqueError({
 // ---------------------------------------------------------------------------
 // Helpers de formato
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Componentes Sprint 5
+// ---------------------------------------------------------------------------
+
+function ReminderRow({ reminder }: { reminder: ReminderItem }) {
+  const badge = _badgeReminder(reminder.prioridad_num, reminder.categoria);
+  return (
+    <div
+      className="rounded-md border px-3 py-2"
+      style={{
+        background: "var(--color-surface)",
+        borderColor: reminder.prioridad_num <= 2 ? badge.color : "var(--color-border)",
+      }}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className="mt-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] shrink-0"
+          style={{
+            background: badge.bg,
+            color: badge.color,
+            minWidth: "26px",
+            textAlign: "center",
+            fontWeight: 700,
+          }}
+          title={badge.label}
+        >
+          P{reminder.prioridad_num}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div
+            className="text-sm leading-snug"
+            style={{ color: "var(--color-text)" }}
+          >
+            {reminder.titulo}
+          </div>
+          {reminder.detalle && (
+            <div
+              className="mt-0.5 text-[11px]"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              {reminder.detalle}
+            </div>
+          )}
+          {reminder.accion_sugerida && (
+            <div
+              className="mt-1 text-[11px]"
+              style={{ color: "var(--color-text-faint)", fontStyle: "italic" }}
+            >
+              → {reminder.accion_sugerida}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function _badgeReminder(
+  prioridad: number,
+  categoria: string,
+): { label: string; color: string; bg: string } {
+  const cats: Record<string, string> = {
+    persona_bloqueada: "Persona bloqueada",
+    decision: "Decisión pendiente",
+    dependencia_externa: "Dependencia externa",
+    revision_comprometida: "Revisión pactada",
+    riesgo_incumplimiento: "Riesgo de deadline",
+    reunion_propuesta_no_confirmada: "Reunión sin confirmar",
+  };
+  const label = cats[categoria] || categoria;
+  if (prioridad === 1)
+    return { label, color: "var(--color-prio-alta)", bg: "var(--color-prio-alta-soft)" };
+  if (prioridad === 2)
+    return { label, color: "var(--color-prio-alta)", bg: "var(--color-prio-alta-soft)" };
+  if (prioridad === 3)
+    return { label, color: "var(--color-prio-media)", bg: "var(--color-prio-media-soft)" };
+  if (prioridad === 4)
+    return { label, color: "var(--color-prio-media)", bg: "var(--color-prio-media-soft)" };
+  return { label, color: "var(--color-text-muted)", bg: "var(--color-surface-hover)" };
+}
+
+function BloqueRow({ bloque }: { bloque: BloquePropuesto }) {
+  const hi = _horaCorta(bloque.inicio);
+  const hf = _horaCorta(bloque.fin);
+  const esEstrat = bloque.tipo === "estrategico";
+  return (
+    <div
+      className="rounded-md border px-3 py-2"
+      style={{
+        background: "var(--color-surface)",
+        borderColor: esEstrat
+          ? "var(--color-accent, var(--color-user-bubble-border))"
+          : "var(--color-border)",
+      }}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span
+              className="font-mono text-xs"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              {hi}–{hf}
+            </span>
+            <span
+              className="rounded px-1.5 py-0.5 text-[9px] uppercase"
+              style={{
+                background: esEstrat
+                  ? "var(--color-prio-baja-soft)"
+                  : "var(--color-surface-hover)",
+                color: esEstrat
+                  ? "var(--color-prio-baja)"
+                  : "var(--color-text-muted)",
+              }}
+            >
+              {bloque.categoria}
+            </span>
+          </div>
+          <div
+            className="mt-1 text-sm leading-snug"
+            style={{ color: "var(--color-text)", fontWeight: esEstrat ? 500 : 400 }}
+          >
+            {bloque.objetivo}
+          </div>
+          {bloque.contexto && (
+            <div
+              className="mt-0.5 text-[11px]"
+              style={{ color: "var(--color-text-faint)" }}
+            >
+              {bloque.contexto}
+            </div>
+          )}
+          {bloque.resultado_esperado && (
+            <div
+              className="mt-1 text-[11px]"
+              style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}
+            >
+              Resultado: {bloque.resultado_esperado}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function _formatearFecha(iso: string): string {
   try {

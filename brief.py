@@ -38,6 +38,8 @@ from models import (
 import bitrix_tasks
 from bitrix import consultar_ocupacion_bitrix, solicitud as _bitrix_solicitud
 import bloques as bloques_mod
+import capacity as capacity_mod
+import forecast as forecast_mod
 import logger
 import usage
 from config_usuarios import USUARIOS_POR_USERNAME
@@ -195,8 +197,29 @@ class IntegrityFinding(BaseModel):
     detalle: str | None = None  # si !ok, que falta
 
 
+class ReminderItem(BaseModel):
+    """Un recordatorio priorizado por Reminder Engine (Sprint 5, §13).
+
+    prioridad_num: 1..5 segun orden estricto §13:
+      1 Personas bloqueadas por CEO
+      2 Decisiones pendientes
+      3 Dependencias externas
+      4 Revisiones comprometidas
+      5 Riesgos de incumplimiento
+    """
+    prioridad_num: int
+    categoria: str  # persona_bloqueada | decision | dependencia_externa |
+                    # revision_comprometida | riesgo_incumplimiento |
+                    # reunion_propuesta_no_confirmada
+    titulo: str
+    detalle: str | None = None
+    accion_sugerida: str | None = None
+    tarea_id: int | None = None
+    persona: str | None = None
+
+
 class BriefEjecutivo(BaseModel):
-    """PHASE 1 §4.1 completo: 13 secciones + metadata."""
+    """PHASE 1 §4.1 (13 secciones) + Sprint 5 (capacity + reminders + forecast)."""
     generado_en: str  # ISO 8601 timezone-aware
     user_id: str
     fecha_ref: str    # dia del que trata el brief (YYYY-MM-DD)
@@ -225,8 +248,8 @@ class BriefEjecutivo(BaseModel):
     # Sec 8 - Waiting for Responses
     waiting: list[ItemTarea]
 
-    # Sec 9 - Proposed Work Blocks
-    proposed_work_blocks: list[str]  # descripciones ("Bloque estrategico 9-11")
+    # Sec 9 - Proposed Work Blocks (Sprint 5: ahora estructurados)
+    proposed_work_blocks: list[dict]  # BloquePropuesto.model_dump()
 
     # Sec 10 - Not Today
     not_today: list[ItemTarea]
@@ -236,10 +259,21 @@ class BriefEjecutivo(BaseModel):
     remaining_inventory_por_tipo: dict[str, int]
 
     # Sec 12 - Missing Information
-    missing_information: list[str]  # frases "Tarea 42 no tiene next_action"
+    missing_information: list[str]
 
     # Sec 13 - Integrity Check
     integrity_check: list[IntegrityFinding]
+
+    # --- Sprint 5 nuevas secciones ---
+
+    # Sec 14 - Capacity today
+    capacidad_hoy: dict | None = None  # CapacidadDia.model_dump()
+
+    # Sec 15 - Forecast next week
+    forecast_proxima_semana: dict | None = None  # ForecastSemana.model_dump()
+
+    # Sec 16 - Reminders priorizados §13
+    reminders: list[ReminderItem] = []
 
 
 # ============================================================================
@@ -853,53 +887,42 @@ def _evaluar_meeting_delegation(tareas_grupo: list[Tarea]) -> dict:
 # STAGE 5 - PROPOSED WORK BLOCKS (Sec 9, PHASE 6 Doc 3 §10)
 # ============================================================================
 
-def _build_proposed_work_blocks(overview: CalendarOverview,
-                                dia: datetime) -> list[str]:
-    """Sugerencias textuales de bloques de trabajo profundo cuando
-    detectamos huecos >=60min entre eventos. Deterministico simple —
-    el motor completo llega en Sprint 5."""
-    todos = sorted(
-        overview.confirmados + overview.propuestos + overview.bloques_protegidos,
-        key=lambda x: x.fecha_inicio,
-    )
-    bloques: list[str] = []
-    ini_jor, fin_jor = _jornada_del(dia)
+def _build_proposed_work_blocks_v2(
+    overview: CalendarOverview,
+    dia: datetime,
+    tareas: list[Tarea],
+) -> tuple[list[dict], "capacity_mod.CapacidadDia"]:
+    """Sprint 5: motor real de capacity + time-blocking (§9 + §10).
 
-    cursor = ini_jor
-    for item in todos:
-        fi_item = datetime.fromisoformat(item.fecha_inicio)
-        if fi_item > cursor:
-            gap_min = _minutos(cursor, fi_item)
-            if gap_min >= 60:
-                categoria = _categoria_bloque(gap_min)
-                bloques.append(
-                    f"{cursor.strftime('%H:%M')}-{fi_item.strftime('%H:%M')} "
-                    f"({gap_min} min, {categoria})"
-                )
-        cursor = max(cursor, datetime.fromisoformat(item.fecha_fin))
-    # Cola de dia
-    if fin_jor > cursor:
-        gap_min = _minutos(cursor, fin_jor)
-        if gap_min >= 60:
-            categoria = _categoria_bloque(gap_min)
-            bloques.append(
-                f"{cursor.strftime('%H:%M')}-{fin_jor.strftime('%H:%M')} "
-                f"({gap_min} min, {categoria})"
-            )
-    return bloques
+    Produce:
+    - CapacidadDia con huecos ya clasificados en las 5 categorias.
+    - Lista de BloquePropuesto[] con objetivo/prioridad/resultado_esperado
+      donde el motor sugiere que dedicar cada hueco a que tarea activa
+      concreta segun prioridad §2.4 y task_type.
+
+    Anteriormente devolvia list[str] con descripciones textuales. Ahora
+    devuelve dicts serializados de BloquePropuesto para que el frontend
+    pueda renderizarlos ricos (objetivo, contexto, tareas_relacionadas).
+    """
+    # Recopilar intervalos ocupados de HOY (confirmados + bloques
+    # protegidos; los propuestos NO cuentan hasta confirmar).
+    ocupados: list[tuple[datetime, datetime]] = []
+    for item in overview.confirmados + overview.bloques_protegidos:
+        try:
+            fi = datetime.fromisoformat(item.fecha_inicio)
+            ff = datetime.fromisoformat(item.fecha_fin)
+            ocupados.append((fi, ff))
+        except ValueError:
+            continue
+
+    cap_dia = capacity_mod.calcular_capacidad_dia(dia, ocupados)
+    propuestos = capacity_mod.proponer_bloques(cap_dia.huecos, tareas)
+    return [b.model_dump() for b in propuestos], cap_dia
 
 
 def _categoria_bloque(minutos: int) -> str:
-    """PHASE 6 Doc 3 §10: 5 categorias."""
-    if minutos <= 10:
-        return "Ultra Short"
-    if minutos <= 30:
-        return "Short"
-    if minutos <= 60:
-        return "Medium"
-    if minutos <= 120:
-        return "Deep Work"
-    return "Strategic Block"
+    """PHASE 6 Doc 3 §10: 5 categorias. Compat con codigo pre-Sprint 5."""
+    return capacity_mod.categoria_de(minutos)
 
 
 # ============================================================================
@@ -1025,7 +1048,203 @@ def _build_integrity_check(
         detalle=f"{len(convs_sin_agenda)} propuestas sin agenda" if convs_sin_agenda else None,
     ))
 
+    # --- Sprint 5: PHASE 6 Doc 3 §15 Integrity Rules ampliadas ---
+
+    # §15.1 Sobrecarga de trabajo (ya cubierto por buffer)
+    # §15.2 Ausencia de bloques estrategicos protegidos
+    cap_hoy = brief_parcial.get("capacidad_hoy")
+    if cap_hoy is not None:
+        tiene_estrat = cap_hoy.get("tiene_bloque_estrategico", True)
+        findings.append(IntegrityFinding(
+            check="Al menos un bloque estrategico protegido hoy",
+            ok=tiene_estrat,
+            detalle=None if tiene_estrat
+                    else "Ningun hueco >=60min disponible. Sin ventana para trabajo profundo.",
+        ))
+
+    # §15.3 Falta de revisiones
+    delegadas = brief_parcial.get("delegated_supervision", [])
+    del_sin_review = [d for d in delegadas
+                      if not getattr(d, "review_date", None)]
+    findings.append(IntegrityFinding(
+        check="Cada delegada tiene review_date fijado",
+        ok=not del_sin_review,
+        detalle=f"{len(del_sin_review)} delegadas sin review_date"
+                if del_sin_review else None,
+    ))
+
+    # §15.4 Conflictos de calendario (ya calculado en overview)
+    findings.append(IntegrityFinding(
+        check="Sin conflictos de calendario",
+        ok=not overview.conflictos,
+        detalle=f"{len(overview.conflictos)} conflictos detectados"
+                if overview.conflictos else None,
+    ))
+
+    # §15.5 Waiting Items sin follow-up
+    waiting_items = brief_parcial.get("waiting", [])
+    wait_sin_fu = [w for w in waiting_items
+                   if not getattr(w, "review_date", None)]
+    findings.append(IntegrityFinding(
+        check="Cada Waiting tiene next_follow_up fijado",
+        ok=not wait_sin_fu,
+        detalle=f"{len(wait_sin_fu)} Waiting sin follow-up"
+                if wait_sin_fu else None,
+    ))
+
+    # §15.6 Exceso de cambios de contexto (fragmentacion detectada en overview)
+    findings.append(IntegrityFinding(
+        check="Sin exceso de cambios de contexto",
+        ok=not overview.riesgo_fragmentacion,
+        detalle="Dia fragmentado: >3 huecos <30min entre eventos"
+                if overview.riesgo_fragmentacion else None,
+    ))
+
+    # §15.7 Conversaciones con la misma persona repartidas (Sprint 1 detecta)
+    # Ya cubierto por executive_conversations; check informativo:
+    findings.append(IntegrityFinding(
+        check="Conversaciones consolidadas por interlocutor",
+        ok=True,
+        detalle=f"{len(conversaciones)} agrupaciones detectadas"
+                if conversaciones else None,
+    ))
+
     return findings
+
+
+# ============================================================================
+# STAGE 6.5 - REMINDER ENGINE (Sprint 5, PHASE 6 Doc 3 §13)
+# ============================================================================
+
+def _build_reminders(
+    people_blocked: list[ItemTarea],
+    delegated_supervision: list[ItemTarea],
+    waiting: list[ItemTarea],
+    conversaciones: list[ItemConversacion],
+    tareas_todas: list[Tarea],
+    dia: datetime,
+) -> list[ReminderItem]:
+    """Sprint 5 §13: recordatorios priorizados por impacto organizacional.
+
+    Orden estricto:
+      1. Personas bloqueadas por CEO
+      2. Decisiones pendientes
+      3. Dependencias externas
+      4. Revisiones comprometidas
+      5. Riesgos de incumplimiento
+      6. (extra) Reuniones propuestas no confirmadas
+
+    Deterministica. No llama al LLM. El brief lo consume para pintar
+    una seccion nueva "Recordatorios" jerarquizada.
+    """
+    ahora = datetime.now(TZ_LOCAL)
+    reminders: list[ReminderItem] = []
+
+    # PRIO 1: Personas bloqueadas por CEO
+    for it in people_blocked:
+        reminders.append(ReminderItem(
+            prioridad_num=1,
+            categoria="persona_bloqueada",
+            titulo=it.title,
+            detalle=it.razon or "Terceros esperan tu acción",
+            accion_sugerida=it.next_action,
+            tarea_id=it.id,
+            persona=it.primary_interlocutor,
+        ))
+
+    # PRIO 2: Decisiones pendientes (Decision task_type activo)
+    from models import TipoTarea
+    for t in tareas_todas:
+        if t.status_eos in (EstadoEOS.COMPLETED, EstadoEOS.CANCELLED):
+            continue
+        if t.task_type == TipoTarea.DECISION and t.id:
+            # Evitar duplicar los que ya salieron en prio 1
+            if any(r.tarea_id == t.id for r in reminders):
+                continue
+            reminders.append(ReminderItem(
+                prioridad_num=2,
+                categoria="decision",
+                titulo=t.title,
+                detalle=t.expected_decision
+                        or "Decisión sin criterio explícito",
+                accion_sugerida=t.next_action,
+                tarea_id=t.id,
+                persona=t.primary_interlocutor,
+            ))
+
+    # PRIO 3: Dependencias externas (Waiting con follow-up vencido)
+    for it in waiting:
+        if it.dias_vencido and it.dias_vencido > 0:
+            reminders.append(ReminderItem(
+                prioridad_num=3,
+                categoria="dependencia_externa",
+                titulo=it.title,
+                detalle=(f"Follow-up vencido hace {it.dias_vencido} días"
+                         if it.dias_vencido > 1
+                         else "Follow-up vencido"),
+                accion_sugerida=(f"Recordar a {it.primary_interlocutor}"
+                                 if it.primary_interlocutor
+                                 else "Enviar recordatorio"),
+                tarea_id=it.id,
+                persona=it.primary_interlocutor,
+            ))
+
+    # PRIO 4: Revisiones comprometidas (delegadas con review_date <= 3 dias)
+    for it in delegated_supervision:
+        if not it.review_date:
+            continue
+        try:
+            rv = datetime.fromisoformat(it.review_date)
+            if rv <= ahora + timedelta(days=3):
+                reminders.append(ReminderItem(
+                    prioridad_num=4,
+                    categoria="revision_comprometida",
+                    titulo=it.title,
+                    detalle=(f"Revisión pactada para "
+                             f"{rv.date().isoformat()}"),
+                    accion_sugerida=(f"Contactar a {it.owner_nombre}"
+                                     if it.owner_nombre
+                                     else "Pedir avance a Owner"),
+                    tarea_id=it.id,
+                    persona=it.owner_nombre,
+                ))
+        except ValueError:
+            pass
+
+    # PRIO 5: Riesgos de incumplimiento (deadline <= 3 dias, tarea no arrancada)
+    for t in tareas_todas:
+        if t.status_eos in (EstadoEOS.COMPLETED, EstadoEOS.CANCELLED):
+            continue
+        if not t.deadline or not t.id:
+            continue
+        if any(r.tarea_id == t.id for r in reminders):
+            continue
+        if t.deadline <= ahora + timedelta(days=3):
+            if t.status_eos in (EstadoEOS.NEW, EstadoEOS.BLOCKED):
+                reminders.append(ReminderItem(
+                    prioridad_num=5,
+                    categoria="riesgo_incumplimiento",
+                    titulo=t.title,
+                    detalle=(f"Deadline {t.deadline.date().isoformat()} "
+                             f"y tarea aun en {t.status_eos.value}"),
+                    accion_sugerida=t.next_action or "Arrancar hoy",
+                    tarea_id=t.id,
+                ))
+
+    # PRIO 6 (extra): Reuniones propuestas no confirmadas §13 final
+    for c in conversaciones:
+        if c.estado_confirmacion == "propuesta":
+            reminders.append(ReminderItem(
+                prioridad_num=6,
+                categoria="reunion_propuesta_no_confirmada",
+                titulo=f"Reunión propuesta con {c.interlocutor}",
+                detalle=(f"{len(c.temas)} temas · "
+                         f"{c.duracion_estimada_min} min"),
+                accion_sugerida="Confirmar, rechazar o resolver asíncronamente",
+                persona=c.interlocutor,
+            ))
+
+    return reminders
 
 
 # ============================================================================
@@ -1241,11 +1460,62 @@ async def generar_brief(user_id: str, fecha_ref: datetime | None = None) -> Brie
     # 4. EXECUTIVE CONVERSATIONS
     conversaciones = _build_executive_conversations(data["tareas"], eventos_hoy_items)
 
-    # 5. PROPOSED WORK BLOCKS
-    work_blocks = _build_proposed_work_blocks(overview, dia)
+    # 5. PROPOSED WORK BLOCKS (Sprint 5: motor real capacity + time-blocking)
+    work_blocks, cap_hoy = _build_proposed_work_blocks_v2(overview, dia, data["tareas"])
 
     # 6. MISSING INFORMATION
     faltas = _build_missing_information(data["tareas"])
+
+    # 6.5 Sprint 5 - REMINDERS priorizados §13
+    reminders = _build_reminders(
+        clasif["people_blocked"],
+        clasif["delegated_supervision"],
+        clasif["waiting"],
+        conversaciones,
+        data["tareas"],
+        dia,
+    )
+
+    # 6.6 Sprint 5 - FORECAST proxima semana (§14)
+    forecast_dict = None
+    try:
+        # Lunes de la proxima semana
+        proximo_lunes = dia + timedelta(days=(7 - dia.weekday()))
+        proximo_lunes = proximo_lunes.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Agrupamos ocupados por dia usando los eventos ya recopilados
+        intervalos_por_dia: dict[str, list[tuple[datetime, datetime]]] = {}
+        for e in data["eventos"]:
+            fi_raw = e.get("DATE_FROM", "") or ""
+            ff_raw = e.get("DATE_TO", "") or ""
+            try:
+                fi = datetime.fromisoformat(fi_raw.replace("Z", "+00:00")) \
+                    if fi_raw else None
+                ff = datetime.fromisoformat(ff_raw.replace("Z", "+00:00")) \
+                    if ff_raw else None
+            except (ValueError, TypeError):
+                continue
+            if fi is None or ff is None:
+                continue
+            if fi.tzinfo is None: fi = fi.replace(tzinfo=TZ_LOCAL)
+            if ff.tzinfo is None: ff = ff.replace(tzinfo=TZ_LOCAL)
+            fi = fi.astimezone(TZ_LOCAL)
+            ff = ff.astimezone(TZ_LOCAL)
+            clave = fi.date().isoformat()
+            intervalos_por_dia.setdefault(clave, []).append((fi, ff))
+
+        cap_semana = capacity_mod.calcular_capacidad_semanal(
+            proximo_lunes, intervalos_por_dia,
+        )
+        fc = forecast_mod.forecast_semana(
+            proximo_lunes, cap_semana, data["eventos"],
+            len(conversaciones), data["tareas"],
+        )
+        forecast_dict = fc.model_dump()
+    except Exception as e:
+        logger.warn("brief", "forecast_error",
+                    f"Fallo forecast: {type(e).__name__}: {e}",
+                    user_id=user_id)
 
     # 7. LLM synthesis (Executive Summary + Three Key Outcomes)
     contexto_llm = {
@@ -1260,10 +1530,13 @@ async def generar_brief(user_id: str, fecha_ref: datetime | None = None) -> Brie
     }
     summary, outcomes = await _synthesize_llm(user_id, contexto_llm)
 
-    # 8. INTEGRITY CHECK
+    # 8. INTEGRITY CHECK (ampliado Sprint 5 con §15)
     integrity = _build_integrity_check(
         {"three_key_outcomes": outcomes,
-         "executive_conversations": conversaciones},
+         "executive_conversations": conversaciones,
+         "delegated_supervision": clasif["delegated_supervision"],
+         "waiting": clasif["waiting"],
+         "capacidad_hoy": cap_hoy.model_dump() if cap_hoy else None},
         faltas, overview,
     )
 
@@ -1285,11 +1558,15 @@ async def generar_brief(user_id: str, fecha_ref: datetime | None = None) -> Brie
         remaining_inventory_por_tipo=clasif["remaining_por_tipo"],
         missing_information=faltas,
         integrity_check=integrity,
+        capacidad_hoy=cap_hoy.model_dump() if cap_hoy else None,
+        forecast_proxima_semana=forecast_dict,
+        reminders=reminders,
     )
 
     logger.info("brief", "generation_ok",
                 f"Brief generado: {len(outcomes)} outcomes, "
-                f"{len(conversaciones)} conversaciones, buffer {overview.buffer_pct}%",
+                f"{len(conversaciones)} conversaciones, buffer {overview.buffer_pct}%, "
+                f"{len(reminders)} reminders",
                 user_id=user_id,
                 metadata={
                     "n_key_outcomes": len(outcomes),
@@ -1298,8 +1575,11 @@ async def generar_brief(user_id: str, fecha_ref: datetime | None = None) -> Brie
                     "n_people_blocked": len(clasif["people_blocked"]),
                     "n_waiting": len(clasif["waiting"]),
                     "n_delegated": len(clasif["delegated_supervision"]),
+                    "n_reminders": len(reminders),
+                    "n_work_blocks": len(work_blocks),
                     "buffer_pct": overview.buffer_pct,
                     "n_faltas": len(faltas),
+                    "forecast_ratio": forecast_dict.get("ratio_carga") if forecast_dict else None,
                 })
 
     return brief
@@ -1385,11 +1665,32 @@ def render_telegram(brief: BriefEjecutivo) -> str:
                 L.append(f"   _{it.razon}_")
         L.append("")
 
-    # 9 Work Blocks
+    # 9 Work Blocks (Sprint 5: ahora son dicts con objetivo)
     if brief.proposed_work_blocks:
-        L.append("*Bloques de trabajo posibles*")
-        for b in brief.proposed_work_blocks[:3]:
-            L.append(f"• {b}")
+        L.append("*Bloques de trabajo propuestos*")
+        for b in brief.proposed_work_blocks[:4]:
+            fi = b.get("inicio", "")[11:16]
+            ff = b.get("fin", "")[11:16]
+            obj = b.get("objetivo", "")[:60]
+            L.append(f"• {fi}-{ff} · {obj}")
+        L.append("")
+
+    # Sprint 5 - Reminders priorizados §13
+    if brief.reminders:
+        L.append(f"*Recordatorios* ({len(brief.reminders)})")
+        for r in brief.reminders[:5]:
+            L.append(f"• [{r.prioridad_num}] {r.titulo}")
+            if r.accion_sugerida:
+                L.append(f"   _{r.accion_sugerida}_")
+        L.append("")
+
+    # Sprint 5 - Forecast proxima semana
+    fc = brief.forecast_proxima_semana
+    if fc and fc.get("riesgos"):
+        n_riesgos = len(fc["riesgos"])
+        L.append(f"*Próxima semana* ({n_riesgos} riesgo{'s' if n_riesgos != 1 else ''})")
+        for r in fc["riesgos"][:3]:
+            L.append(f"• {r.get('descripcion', '')[:120]}")
         L.append("")
 
     # 12 Missing info

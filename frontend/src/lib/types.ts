@@ -195,10 +195,90 @@ export interface BriefEjecutivo {
   executive_conversations: ItemConversacion[];
   delegated_supervision: ItemTareaBrief[];
   waiting: ItemTareaBrief[];
-  proposed_work_blocks: string[];
+  proposed_work_blocks: BloquePropuesto[];  // Sprint 5: ahora estructurados
   not_today: ItemTareaBrief[];
   remaining_inventory_total: number;
   remaining_inventory_por_tipo: Record<string, number>;
   missing_information: string[];
   integrity_check: IntegrityFinding[];
+
+  // --- Sprint 5 nuevas secciones ---
+  capacidad_hoy: CapacidadDia | null;
+  forecast_proxima_semana: ForecastSemana | null;
+  reminders: ReminderItem[];
+}
+
+// Sprint 5 - Capacity Planning + Time Blocking (PHASE 6 Doc 3 §9-§10)
+
+export interface Hueco {
+  inicio: string;
+  fin: string;
+  duracion_min: number;
+  categoria: string;  // Ultra Short | Short | Medium | Deep Work | Strategic Block
+}
+
+export interface CapacidadDia {
+  fecha: string;
+  total_min: number;
+  ocupado_min: number;
+  libre_min: number;
+  buffer_pct: number;
+  buffer_ok: boolean;
+  tiene_bloque_estrategico: boolean;
+  huecos: Hueco[];
+}
+
+export interface BloquePropuesto {
+  inicio: string;
+  fin: string;
+  duracion_min: number;
+  categoria: string;
+  objetivo: string;
+  prioridad: "alta" | "media" | "baja" | string;
+  contexto: string | null;
+  resultado_esperado: string | null;
+  tareas_relacionadas: number[];
+  tipo: "operativo" | "estrategico" | string;
+}
+
+// Sprint 5 - Reminder Engine (§13)
+
+export type CategoriaReminder =
+  | "persona_bloqueada"
+  | "decision"
+  | "dependencia_externa"
+  | "revision_comprometida"
+  | "riesgo_incumplimiento"
+  | "reunion_propuesta_no_confirmada"
+  | string;
+
+export interface ReminderItem {
+  prioridad_num: number;  // 1..6
+  categoria: CategoriaReminder;
+  titulo: string;
+  detalle: string | null;
+  accion_sugerida: string | null;
+  tarea_id: number | null;
+  persona: string | null;
+}
+
+// Sprint 5 - Forecast Engine (§14)
+
+export interface RiesgoForecast {
+  categoria: string;
+  severidad: "alta" | "media" | "baja" | string;
+  descripcion: string;
+  dia_afectado: string | null;
+}
+
+export interface ForecastSemana {
+  lunes: string;
+  carga_esperada_min: number;
+  capacidad_disponible_min: number;
+  ratio_carga: number;
+  n_eventos_agendados: number;
+  n_reuniones_propuestas: number;
+  n_waiting_acumulado: number;
+  n_deadlines_esa_semana: number;
+  riesgos: RiesgoForecast[];
 }
