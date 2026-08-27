@@ -82,3 +82,143 @@ body {
   animation: recording-pulse 1.5s infinite;
   background: #ef4444 !important;
 }
+
+/* ============================================================================
+   Sistema de animaciones Apple-style (iOS/macOS feel)
+   ============================================================================ */
+
+/* Easing curves de iOS. La primera es la "hero" — sube rapido y frena suave. */
+:root {
+  --ease-out-quart: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-back: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 150ms;
+  --duration-base: 220ms;
+  --duration-slow: 320ms;
+}
+
+/* Cualquier boton con .apple-tap tiene feedback tactil en click:
+   scale 0.96 durante active. Combinado con transition-all para hover. */
+.apple-tap {
+  transition: transform var(--duration-fast) var(--ease-standard),
+              background-color var(--duration-base) var(--ease-standard),
+              border-color var(--duration-base) var(--ease-standard),
+              color var(--duration-base) var(--ease-standard),
+              opacity var(--duration-base) var(--ease-standard),
+              box-shadow var(--duration-base) var(--ease-standard);
+}
+.apple-tap:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* Version "lift": el elemento se eleva ligeramente en hover, se hunde en click.
+   Para botones prominentes (Ver Brief, enviar). */
+.apple-lift {
+  transition: transform var(--duration-base) var(--ease-out-quart),
+              box-shadow var(--duration-base) var(--ease-standard),
+              background-color var(--duration-base) var(--ease-standard),
+              opacity var(--duration-base) var(--ease-standard);
+}
+.apple-lift:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+.apple-lift:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+}
+
+/* Fade-in con desplazamiento pequeno, para elementos que entran. */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in-up {
+  animation: fade-in-up var(--duration-slow) var(--ease-out-quart) both;
+}
+
+/* Stagger sencillo para listas: aplica .stagger a un contenedor y sus hijos
+   entraran con delay creciente hasta 8 items. */
+.stagger > * {
+  opacity: 0;
+  animation: fade-in-up var(--duration-slow) var(--ease-out-quart) forwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 40ms; }
+.stagger > *:nth-child(3) { animation-delay: 80ms; }
+.stagger > *:nth-child(4) { animation-delay: 120ms; }
+.stagger > *:nth-child(5) { animation-delay: 160ms; }
+.stagger > *:nth-child(6) { animation-delay: 200ms; }
+.stagger > *:nth-child(7) { animation-delay: 240ms; }
+.stagger > *:nth-child(8) { animation-delay: 280ms; }
+
+/* Scale-in con rebote sutil para modales/cards importantes */
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.animate-scale-in {
+  animation: scale-in var(--duration-slow) var(--ease-out-back) both;
+}
+
+/* Pulso ambient sutil para elementos destacados (Ver Brief cuando el brief
+   esta fresco). Muy discreto, no distrae. */
+@keyframes ambient-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.08);
+  }
+}
+.animate-ambient {
+  animation: ambient-glow 2.4s var(--ease-standard) infinite;
+}
+
+/* Grabacion mejorada: pulso rojo con anillo expansivo */
+@keyframes recording-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7),
+                0 0 0 0 rgba(239, 68, 68, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0),
+                0 0 0 16px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0),
+                0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+.recording-active {
+  background: #ef4444 !important;
+  color: white !important;
+  animation: recording-ring 1.6s var(--ease-standard) infinite;
+}
+
+/* Micro-shake para errores/rechazo */
+@keyframes shake-x {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-3px); }
+  40%, 80% { transform: translateX(3px); }
+}
+.animate-shake {
+  animation: shake-x 300ms var(--ease-standard);
+}
+
+/* Transiciones globales suaves para sidebar/nav items. Sin JS. */
+.smooth-hover {
+  transition: background-color var(--duration-base) var(--ease-standard),
+              color var(--duration-base) var(--ease-standard),
+              border-color var(--duration-base) var(--ease-standard);
+}

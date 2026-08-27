@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Send } from "lucide-react";
 import VoiceButton from "./VoiceButton";
 import QuickActions from "./QuickActions";
@@ -9,19 +9,23 @@ interface Props {
   disabled: boolean;
 }
 
-// Compositor inferior: chips de acciones rapidas + input de texto +
-// boton de grabacion + boton de enviar.
+// Compositor inferior con animaciones Apple-style:
+// - Contenedor con focus ring suave cuando el textarea tiene el foco.
+// - Boton enviar con lift + scale-tap + estado disabled visualmente claro.
+// - Al enviar, el input se vacia con una micro-animation de fade.
 export default function Composer({ onEnviarTexto, onEnviarAudio, disabled }: Props) {
   const [texto, setTexto] = useState("");
+  const [foco, setFoco] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   function handleEnviar() {
     if (!texto.trim() || disabled) return;
     onEnviarTexto(texto);
     setTexto("");
+    textareaRef.current?.focus();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // Enter envia, Shift+Enter hace salto de linea
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleEnviar();
@@ -29,9 +33,10 @@ export default function Composer({ onEnviarTexto, onEnviarAudio, disabled }: Pro
   }
 
   function handleQuickAction(accion: string) {
-    // El chip envia el texto directamente
     onEnviarTexto(accion);
   }
+
+  const puedeEnviar = !disabled && texto.trim().length > 0;
 
   return (
     <div className="py-4">
@@ -41,13 +46,24 @@ export default function Composer({ onEnviarTexto, onEnviarAudio, disabled }: Pro
         className="flex items-end gap-2 rounded-2xl border p-2"
         style={{
           background: "var(--color-surface)",
-          borderColor: "var(--color-border)",
+          borderColor: foco
+            ? "var(--color-user-bubble-border)"
+            : "var(--color-border)",
+          boxShadow: foco
+            ? "0 0 0 3px rgba(16, 185, 129, 0.08)"
+            : "none",
+          transition:
+            "border-color var(--duration-base) var(--ease-standard), " +
+            "box-shadow var(--duration-base) var(--ease-standard)",
         }}
       >
         <textarea
+          ref={textareaRef}
           value={texto}
           onChange={(e) => setTexto(e.target.value)}
           onKeyDown={handleKeyDown}
+          onFocus={() => setFoco(true)}
+          onBlur={() => setFoco(false)}
           placeholder="Escribe o mantén pulsado el micrófono..."
           rows={1}
           disabled={disabled}
@@ -59,15 +75,21 @@ export default function Composer({ onEnviarTexto, onEnviarAudio, disabled }: Pro
 
         <button
           onClick={handleEnviar}
-          disabled={disabled || !texto.trim()}
-          className="flex h-10 w-10 items-center justify-center rounded-full transition-opacity disabled:opacity-30"
+          disabled={!puedeEnviar}
+          className="apple-lift flex h-10 w-10 items-center justify-center rounded-full disabled:cursor-not-allowed"
           style={{
-            background: "var(--color-accent)",
-            color: "white",
+            background: puedeEnviar
+              ? "var(--color-accent)"
+              : "var(--color-surface-hover)",
+            color: puedeEnviar ? "white" : "var(--color-text-faint)",
+            boxShadow: puedeEnviar
+              ? "0 2px 8px rgba(16, 185, 129, 0.25)"
+              : "none",
           }}
           title="Enviar"
+          aria-label="Enviar mensaje"
         >
-          <Send size={16} />
+          <Send size={16} style={{ transform: "translateX(1px)" }} />
         </button>
       </div>
     </div>

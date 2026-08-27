@@ -1,18 +1,56 @@
-import { useRef, useState } from "react";
-import { Mic } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Mic, Square } from "lucide-react";
 
 interface Props {
   onGrabacionCompleta: (blob: Blob) => void;
   disabled: boolean;
 }
 
-// Boton hold-to-record. Mantener pulsado inicia grabacion, soltar la envia.
-// Usa MediaRecorder nativo del navegador (formato webm).
+/**
+ * Boton hold-to-record con feedback visual completo.
+ *
+ * UX:
+ * - Idle: circulo con icono microfono, animation apple-tap (scale 0.96 al click).
+ * - Grabando: rojo con anillo pulsante expansivo (recording-active), icono
+ *   cambia a stop, y aparece flotando encima un contador "0:12" con la
+ *   duracion. Sin esto no habia forma de saber si estaba grabando.
+ * - Rechazo (grabacion <1s): shake horizontal breve para indicar que se
+ *   ignoro por accidente.
+ *
+ * Interaccion: mantener pulsado / touch. Al soltar envia; si el user
+ * arrastra fuera del boton (mouseleave) tambien envia — mismo comportamiento
+ * que Telegram/WhatsApp.
+ */
 export default function VoiceButton({ onGrabacionCompleta, disabled }: Props) {
   const [grabando, setGrabando] = useState(false);
+  const [segundos, setSegundos] = useState(0);
+  const [shake, setShake] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const inicioRef = useRef<number>(0);
+  const tickRef = useRef<number | null>(null);
+
+  // Contador de segundos mientras grabamos. Se actualiza cada 200ms para no
+  // agotar bateria; suficiente para mostrar segundos enteros con precision.
+  useEffect(() => {
+    if (grabando) {
+      inicioRef.current = Date.now();
+      setSegundos(0);
+      tickRef.current = window.setInterval(() => {
+        setSegundos(Math.floor((Date.now() - inicioRef.current) / 1000));
+      }, 200);
+    } else {
+      if (tickRef.current) {
+        window.clearInterval(tickRef.current);
+        tickRef.current = null;
+      }
+      setSegundos(0);
+    }
+    return () => {
+      if (tickRef.current) window.clearInterval(tickRef.current);
+    };
+  }, [grabando]);
 
   async function empezarGrabacion() {
     if (disabled || grabando) return;
@@ -22,24 +60,22 @@ export default function VoiceButton({ onGrabacionCompleta, disabled }: Props) {
       streamRef.current = stream;
       chunksRef.current = [];
 
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm",
-      });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) chunksRef.current.push(event.data);
       };
 
       mediaRecorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        // Ignoramos grabaciones muy cortas (probable pulsacion accidental)
+        // Ignoramos grabaciones muy cortas y damos feedback visual (shake).
         if (blob.size > 1000) {
           onGrabacionCompleta(blob);
+        } else {
+          setShake(true);
+          window.setTimeout(() => setShake(false), 320);
         }
-        // Cerrar el stream para apagar el led del microfono
         streamRef.current?.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       };
@@ -48,7 +84,7 @@ export default function VoiceButton({ onGrabacionCompleta, disabled }: Props) {
       setGrabando(true);
     } catch (err) {
       console.error("[voz] error accediendo al microfono:", err);
-      alert("No he podido acceder al microfono. Comprueba los permisos del navegador.");
+      alert("No he podido acceder al micrófono. Comprueba los permisos del navegador.");
     }
   }
 
@@ -58,31 +94,51 @@ export default function VoiceButton({ onGrabacionCompleta, disabled }: Props) {
     setGrabando(false);
   }
 
+  const mm = String(Math.floor(segundos / 60)).padStart(1, "0");
+  const ss = String(segundos % 60).padStart(2, "0");
+
   return (
-    <button
-      onMouseDown={empezarGrabacion}
-      onMouseUp={pararGrabacion}
-      onMouseLeave={pararGrabacion}
-      onTouchStart={(e) => {
-        e.preventDefault();
-        empezarGrabacion();
-      }}
-      onTouchEnd={(e) => {
-        e.preventDefault();
-        pararGrabacion();
-      }}
-      disabled={disabled}
-      className={`flex h-10 w-10 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
-        grabando ? "recording" : ""
-      }`}
-      style={{
-        background: grabando ? "#ef4444" : "var(--color-surface)",
-        border: "1px solid var(--color-border)",
-        color: grabando ? "white" : "var(--color-text-muted)",
-      }}
-      title="Mantén pulsado para grabar"
-    >
-      <Mic size={18} />
-    </button>
+    <div className="relative">
+      {/* Contador flotante encima del boton mientras graba */}
+      {grabando && (
+        <div
+          className="animate-fade-in-up pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 rounded-full px-2.5 py-1 text-xs font-mono tabular-nums shadow-lg"
+          style={{
+            background: "#ef4444",
+            color: "white",
+            whiteSpace: "nowrap",
+          }}
+        >
+          ● {mm}:{ss}
+        </div>
+      )}
+
+      <button
+        onMouseDown={empezarGrabacion}
+        onMouseUp={pararGrabacion}
+        onMouseLeave={pararGrabacion}
+        onTouchStart={(e) => {
+          e.preventDefault();
+          empezarGrabacion();
+        }}
+        onTouchEnd={(e) => {
+          e.preventDefault();
+          pararGrabacion();
+        }}
+        disabled={disabled}
+        className={`apple-tap flex h-10 w-10 items-center justify-center rounded-full disabled:opacity-40 disabled:cursor-not-allowed ${
+          grabando ? "recording-active" : ""
+        } ${shake ? "animate-shake" : ""}`}
+        style={{
+          background: grabando ? undefined : "var(--color-surface)",
+          border: grabando ? "1px solid transparent" : "1px solid var(--color-border)",
+          color: grabando ? undefined : "var(--color-text-muted)",
+        }}
+        title={grabando ? "Suelta para enviar" : "Mantén pulsado para grabar"}
+        aria-label={grabando ? "Grabando audio" : "Grabar audio"}
+      >
+        {grabando ? <Square size={16} fill="white" /> : <Mic size={18} />}
+      </button>
+    </div>
   );
 }

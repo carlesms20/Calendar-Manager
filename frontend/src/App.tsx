@@ -133,7 +133,9 @@ export default function App() {
               onInvalidarDatos={invalidarDatos}
               tareas={tareas}
               tareasCargando={tareasCargando}
+              eventos={eventos}
               onIrATareas={() => setSeccion("tareas")}
+              onIrACalendario={() => setSeccion("calendario")}
             />
           )}
 
