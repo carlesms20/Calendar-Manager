@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Calendar, Clock, TrendingUp } from "lucide-react";
 import type { Evento, Tarea } from "../lib/types";
+import RollingNumber from "./RollingNumber";
 
 interface Props {
   eventos: Evento[];
@@ -27,6 +28,16 @@ export default function PanelLateralDia({
   onIrACalendario,
   onIrATareas,
 }: Props) {
+  // Tick vivo cada 30s para que el countdown "en X min" se actualice sin
+  // recarga. Es un dummy que fuerza re-render de los useMemo dependientes.
+  // 30s es suficiente para minutos redondeados (no queremos precision de
+  // segundos aqui, que ademas es peor UX).
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const { proximoEvento, minutosHastaProximo } = useMemo(() => {
     const ahora = new Date();
     const futuros = eventos
@@ -42,7 +53,8 @@ export default function PanelLateralDia({
       (new Date(prox.fecha_inicio).getTime() - ahora.getTime()) / 60000,
     );
     return { proximoEvento: prox, minutosHastaProximo: min };
-  }, [eventos]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventos, tick]);
 
   const proximosDeadlines = useMemo(() => {
     const ahora = new Date();
@@ -274,7 +286,7 @@ function Kpi({
               : "var(--color-text)",
         }}
       >
-        {valor}
+        <RollingNumber value={valor} />
       </div>
       <div
         className="mt-1 text-[10px] uppercase tracking-wide leading-none"

@@ -11,6 +11,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { useBrief } from "../lib/useBrief";
+import DonutRatio from "../components/DonutRatio";
 import type {
   ReminderItem,
   CategoriaReminder,
@@ -412,8 +413,6 @@ function BloqueCard({ bloque }: { bloque: BloquePropuesto }) {
 }
 
 function SeccionForecast({ fc }: { fc: ForecastSemana }) {
-  const sobrecarga = fc.ratio_carga > 1.0;
-  const casiSobre = fc.ratio_carga > 0.85 && !sobrecarga;
   return (
     <div>
       <div className="mb-3 flex items-center gap-2">
@@ -425,34 +424,46 @@ function SeccionForecast({ fc }: { fc: ForecastSemana }) {
           Semana que viene
         </h3>
       </div>
+      {/* Header con donut ratio + KPIs a la derecha */}
       <div
-        className="mb-3 flex items-center gap-3 rounded-md border px-3 py-2 text-xs"
+        className="mb-3 flex items-center gap-4 rounded-md border px-4 py-3"
         style={{
           background: "var(--color-surface)",
           borderColor: "var(--color-border)",
         }}
       >
-        <span style={{ color: "var(--color-text-muted)" }}>Ratio de carga:</span>
-        <span
-          className="font-mono"
-          style={{
-            color: sobrecarga
-              ? "var(--color-prio-alta)"
-              : casiSobre
-              ? "var(--color-prio-media)"
-              : "var(--color-text)",
-          }}
-        >
-          {Math.round(fc.ratio_carga * 100)}%
-        </span>
-        <span style={{ color: "var(--color-text-faint)" }}>·</span>
-        <span style={{ color: "var(--color-text-muted)" }}>
-          {fc.n_deadlines_esa_semana} deadlines
-        </span>
-        <span style={{ color: "var(--color-text-faint)" }}>·</span>
-        <span style={{ color: "var(--color-text-muted)" }}>
-          {fc.n_eventos_agendados} eventos
-        </span>
+        <DonutRatio ratio={fc.ratio_carga} size={72} strokeWidth={7} />
+        <div className="flex-1">
+          <div
+            className="text-[10px] uppercase tracking-wider"
+            style={{ color: "var(--color-text-faint)", fontWeight: 600 }}
+          >
+            Ratio de carga
+          </div>
+          <div
+            className="mt-2 flex flex-col gap-1 text-xs"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            <div>
+              <span
+                className="font-mono"
+                style={{ color: "var(--color-text)" }}
+              >
+                {fc.n_deadlines_esa_semana}
+              </span>{" "}
+              deadlines
+            </div>
+            <div>
+              <span
+                className="font-mono"
+                style={{ color: "var(--color-text)" }}
+              >
+                {fc.n_eventos_agendados}
+              </span>{" "}
+              eventos agendados
+            </div>
+          </div>
+        </div>
       </div>
       <div className="space-y-1.5">
         {fc.riesgos.map((r, i) => (
@@ -520,30 +531,26 @@ function SkeletonRecomendaciones() {
     <div className="space-y-6">
       <div>
         <div
-          className="mb-3 h-3 w-32 animate-pulse rounded"
-          style={{ background: "var(--color-surface-hover)" }}
+          className="mb-3 h-3 w-32 animate-shimmer rounded"
         />
         <div className="space-y-2">
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              className="h-16 animate-pulse rounded-md"
-              style={{ background: "var(--color-surface-hover)" }}
+              className="h-16 animate-shimmer rounded-md"
             />
           ))}
         </div>
       </div>
       <div>
         <div
-          className="mb-3 h-3 w-40 animate-pulse rounded"
-          style={{ background: "var(--color-surface-hover)" }}
+          className="mb-3 h-3 w-40 animate-shimmer rounded"
         />
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
               key={i}
-              className="h-14 animate-pulse rounded-md"
-              style={{ background: "var(--color-surface-hover)" }}
+              className="h-14 animate-shimmer rounded-md"
             />
           ))}
         </div>

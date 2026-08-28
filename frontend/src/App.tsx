@@ -124,38 +124,42 @@ export default function App() {
         />
 
         <main className="flex-1 overflow-hidden">
-          {seccion === "mi-dia" && (
-            <MiDia
-              mensajes={mensajes}
-              procesando={procesando}
-              onAnadirMensaje={anadirMensaje}
-              onSetProcesando={setProcesando}
-              onInvalidarDatos={invalidarDatos}
-              tareas={tareas}
-              tareasCargando={tareasCargando}
-              eventos={eventos}
-              onIrATareas={() => setSeccion("tareas")}
-              onIrACalendario={() => setSeccion("calendario")}
-            />
-          )}
+          {/* Wrapper con key=seccion para que React remonte y anime la
+              entrada. animate-view-in aplica fade-in-up de 280ms. */}
+          <div key={seccion} className="animate-view-in h-full">
+            {seccion === "mi-dia" && (
+              <MiDia
+                mensajes={mensajes}
+                procesando={procesando}
+                onAnadirMensaje={anadirMensaje}
+                onSetProcesando={setProcesando}
+                onInvalidarDatos={invalidarDatos}
+                tareas={tareas}
+                tareasCargando={tareasCargando}
+                eventos={eventos}
+                onIrATareas={() => setSeccion("tareas")}
+                onIrACalendario={() => setSeccion("calendario")}
+              />
+            )}
 
-          {seccion === "tareas" && (
-            <Tareas
-              tareas={tareas}
-              cargando={tareasCargando}
-              error={tareasError}
-              truncado={tareasTruncado}
-              onRefrescar={refrescarTareas}
-              onMutarEstado={mutarEstado}
-              onInvalidarDatos={invalidarDatos}
-            />
-          )}
+            {seccion === "tareas" && (
+              <Tareas
+                tareas={tareas}
+                cargando={tareasCargando}
+                error={tareasError}
+                truncado={tareasTruncado}
+                onRefrescar={refrescarTareas}
+                onMutarEstado={mutarEstado}
+                onInvalidarDatos={invalidarDatos}
+              />
+            )}
 
-          {seccion === "calendario" && (
-            <Calendario onInvalidarSemanaActual={refrescarEventos} />
-          )}
+            {seccion === "calendario" && (
+              <Calendario onInvalidarSemanaActual={refrescarEventos} />
+            )}
 
-          {seccion === "recomendaciones" && <Recomendaciones />}
+            {seccion === "recomendaciones" && <Recomendaciones />}
+          </div>
         </main>
       </div>
     </div>

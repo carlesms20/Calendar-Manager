@@ -44,15 +44,20 @@ export default function Brief({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-8"
-      style={{ background: "rgba(0, 0, 0, 0.65)", backdropFilter: "blur(4px)" }}
+      className="animate-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-8"
+      style={{
+        background: "rgba(0, 0, 0, 0.55)",
+        backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
+      }}
       onClick={onCerrar}
     >
       <div
-        className="w-full max-w-2xl rounded-2xl border"
+        className="animate-modal-spring w-full max-w-2xl rounded-2xl border"
         style={{
           background: "var(--color-surface)",
           borderColor: "var(--color-border)",
+          boxShadow: "0 24px 64px rgba(0, 0, 0, 0.4)",
         }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -978,20 +983,16 @@ function SkeletonCarga() {
   return (
     <div className="space-y-3">
       <div
-        className="h-4 w-3/4 animate-pulse rounded"
-        style={{ background: "var(--color-surface-hover)" }}
+        className="h-4 w-3/4 animate-shimmer rounded"
       />
       <div
-        className="h-20 animate-pulse rounded-lg"
-        style={{ background: "var(--color-surface-hover)" }}
+        className="h-20 animate-shimmer rounded-lg"
       />
       <div
-        className="h-24 animate-pulse rounded-lg"
-        style={{ background: "var(--color-surface-hover)" }}
+        className="h-24 animate-shimmer rounded-lg"
       />
       <div
-        className="h-16 animate-pulse rounded-lg"
-        style={{ background: "var(--color-surface-hover)" }}
+        className="h-16 animate-shimmer rounded-lg"
       />
       <p
         className="text-center text-xs"

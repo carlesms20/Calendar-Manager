@@ -21,9 +21,15 @@ export default function Chat({ mensajes, procesando }: Props) {
       {mensajes.length === 0 && !procesando && <MensajeVacio />}
       <div className="flex flex-col gap-4">
         {mensajes.map((m) => (
-          <MessageBubble key={m.id} mensaje={m} />
+          <div key={m.id} className="animate-message-in">
+            <MessageBubble mensaje={m} />
+          </div>
         ))}
-        {procesando && <TypingIndicator />}
+        {procesando && (
+          <div className="animate-message-in">
+            <TypingIndicator />
+          </div>
+        )}
       </div>
       <div ref={bottomRef} />
     </div>
