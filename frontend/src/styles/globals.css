@@ -458,3 +458,49 @@ body {
 .stagger > *:nth-child(20) {
   animation-delay: 600ms;
 }
+
+/* ============================================================================
+   Sprint 5.4 Calendario — Florituras
+   ============================================================================ */
+
+/* --- Now dot pulse: anillo expansivo rojo detras del dot de la linea "ahora" --- */
+@keyframes now-dot-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.25;
+  }
+  50% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+/* --- Calendar event entrada: fade + slide desde arriba con delay stagger.
+       animationDelay se aplica inline por evento (max 240ms). --- */
+@keyframes calendar-event-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.calendar-event {
+  animation: calendar-event-in 300ms var(--ease-out-quart) both;
+  transition: transform 200ms var(--ease-out-quart),
+              box-shadow 200ms var(--ease-standard),
+              filter 200ms var(--ease-standard),
+              outline 150ms var(--ease-standard);
+  will-change: transform;
+}
+.calendar-event:hover {
+  transform: translateY(-1px) scale(1.02);
+  z-index: 10 !important;
+  filter: brightness(1.15);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.calendar-event:active {
+  transform: translateY(0) scale(0.98);
+}
