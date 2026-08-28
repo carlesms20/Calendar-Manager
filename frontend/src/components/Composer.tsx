@@ -16,12 +16,15 @@ interface Props {
 export default function Composer({ onEnviarTexto, onEnviarAudio, disabled }: Props) {
   const [texto, setTexto] = useState("");
   const [foco, setFoco] = useState(false);
+  const [swipeSend, setSwipeSend] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   function handleEnviar() {
     if (!texto.trim() || disabled) return;
     onEnviarTexto(texto);
     setTexto("");
+    // Trigger swipe animation: incrementamos key para forzar re-render del span
+    setSwipeSend((k) => k + 1);
     textareaRef.current?.focus();
   }
 
@@ -89,7 +92,12 @@ export default function Composer({ onEnviarTexto, onEnviarAudio, disabled }: Pro
           title="Enviar"
           aria-label="Enviar mensaje"
         >
-          <Send size={16} style={{ transform: "translateX(1px)" }} />
+          <Send
+            key={swipeSend}
+            size={16}
+            className={swipeSend > 0 ? "animate-send-swipe" : ""}
+            style={{ transform: "translateX(1px)" }}
+          />
         </button>
       </div>
     </div>

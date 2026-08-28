@@ -151,7 +151,7 @@ function ContenidoBrief({ brief }: { brief: BriefEjecutivo }) {
   const bufferBajo = ov.buffer_pct < 30;
 
   return (
-    <div className="space-y-5">
+    <div className="stagger space-y-5">
       {/* 1. Executive Summary */}
       <Seccion titulo="Situación" icono={<Zap size={14} />}>
         <p
@@ -1054,9 +1054,10 @@ function BloqueError({
 
 function ReminderRow({ reminder }: { reminder: ReminderItem }) {
   const badge = _badgeReminder(reminder.prioridad_num, reminder.categoria);
+  const esP1 = reminder.prioridad_num === 1;
   return (
     <div
-      className="rounded-md border px-3 py-2"
+      className={`card-hover-lift rounded-md border px-3 py-2 ${esP1 ? "animate-ambient-red" : ""}`}
       style={{
         background: "var(--color-surface)",
         borderColor: reminder.prioridad_num <= 2 ? badge.color : "var(--color-border)",

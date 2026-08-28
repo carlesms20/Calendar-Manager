@@ -322,3 +322,139 @@ body {
 .animate-view-in {
   animation: fade-in-up 280ms var(--ease-out-quart) both;
 }
+
+/* ============================================================================
+   Sprint 5.3 UX Deluxe — 12 animaciones adicionales
+   ============================================================================ */
+
+/* --- Pulse rojo ambient (Tanda B.5): reminders P1 ---
+   Halo rojo muy sutil que pulsa cada 2.4s. Da sensacion de urgencia sin
+   distraer. Se aplica al card entero. */
+@keyframes ambient-red-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12); }
+}
+.animate-ambient-red {
+  animation: ambient-red-pulse 2.4s var(--ease-standard) infinite;
+}
+
+/* --- Pulse naranja ambient (Tanda B.6): pill topbar "atencion" --- */
+@keyframes ambient-orange-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 146, 60, 0); }
+  50% { box-shadow: 0 0 0 5px rgba(251, 146, 60, 0.15); }
+}
+.animate-ambient-orange {
+  animation: ambient-orange-pulse 2.8s var(--ease-standard) infinite;
+}
+
+/* --- Bounce sutil (Tanda B.7): assistant TypingIndicator ---
+   Al aparecer, el avatar hace un pequeno salto. */
+@keyframes assistant-bounce-in {
+  0% { transform: translateY(6px) scale(0.9); opacity: 0; }
+  60% { transform: translateY(-3px) scale(1.03); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+.animate-assistant-bounce {
+  animation: assistant-bounce-in 380ms var(--ease-out-back) both;
+}
+
+/* --- Toast slide-in (Tanda C.11): notificaciones esquina ---
+   Entra desde abajo derecha con spring y opacidad. */
+@keyframes toast-slide-in {
+  0% { transform: translateY(24px) scale(0.95); opacity: 0; }
+  60% { transform: translateY(-2px) scale(1.01); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+@keyframes toast-slide-out {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(24px); opacity: 0; }
+}
+.animate-toast-in {
+  animation: toast-slide-in 380ms var(--ease-out-back) both;
+}
+.animate-toast-out {
+  animation: toast-slide-out 240ms var(--ease-standard) both;
+}
+
+/* --- Waveform bars (Tanda C.12): grabacion audio ---
+   3 barras verticales con altura oscilante. Cada barra tiene su propio
+   delay para no verse sincronizadas (mas natural). */
+@keyframes waveform-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+.waveform-bar-1 { animation: waveform-bar 0.6s var(--ease-standard) infinite; }
+.waveform-bar-2 { animation: waveform-bar 0.8s var(--ease-standard) infinite 0.1s; }
+.waveform-bar-3 { animation: waveform-bar 0.7s var(--ease-standard) infinite 0.2s; }
+.waveform-bar-4 { animation: waveform-bar 0.9s var(--ease-standard) infinite 0.05s; }
+
+/* --- Send button swipe (Tanda B.8): al enviar mensaje ---
+   El icono avion hace un swipe hacia la derecha y aparece uno nuevo. */
+@keyframes send-swipe {
+  0% { transform: translateX(1px) scale(1); opacity: 1; }
+  50% { transform: translateX(20px) scale(0.9); opacity: 0; }
+  50.01% { transform: translateX(-20px) scale(0.9); opacity: 0; }
+  100% { transform: translateX(1px) scale(1); opacity: 1; }
+}
+.animate-send-swipe {
+  animation: send-swipe 440ms var(--ease-out-quart) both;
+}
+
+/* --- Focus mode dimming (Tanda C.10): doble-tap chat --- */
+.focus-mode-dimmed {
+  opacity: 0.35 !important;
+  transition: opacity 320ms var(--ease-standard) !important;
+  pointer-events: none;
+}
+
+/* --- Header con blur al scroll (Tanda C.9) ---
+   Applied dynamicamente via JS cuando el scroll pasa de X pixels. */
+.header-scrolled {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: rgba(var(--color-surface-rgb, 22, 22, 26), 0.75) !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* --- Numero tick (Tanda B.8 bis): reloj topbar cambia de minuto ---
+   Cuando el minuto cambia, un pequeno pulse. Sutil. */
+@keyframes clock-tick {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+.animate-clock-tick {
+  animation: clock-tick 320ms var(--ease-out-quart) both;
+}
+
+/* --- Attention-getter para cards con hover-lift (Tanda A.4) ---
+   Sombra Apple-style cuando hover, translation subtle. Diferente de
+   apple-lift porque este es para cards estaticos, no botones. */
+.card-hover-lift {
+  transition: transform var(--duration-base) var(--ease-out-quart),
+              box-shadow var(--duration-base) var(--ease-standard),
+              border-color var(--duration-base) var(--ease-standard);
+  cursor: default;
+}
+.card-hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+}
+
+/* Extension del stagger para listas grandes (Tareas, Calendario).
+   Cap a 20 items — el resto aparece sin delay, que ademas es correcto
+   porque van bajo el fold. */
+.stagger > *:nth-child(9)  { animation-delay: 320ms; }
+.stagger > *:nth-child(10) { animation-delay: 360ms; }
+.stagger > *:nth-child(11) { animation-delay: 400ms; }
+.stagger > *:nth-child(12) { animation-delay: 440ms; }
+.stagger > *:nth-child(13) { animation-delay: 480ms; }
+.stagger > *:nth-child(14) { animation-delay: 520ms; }
+.stagger > *:nth-child(15) { animation-delay: 560ms; }
+.stagger > *:nth-child(16),
+.stagger > *:nth-child(17),
+.stagger > *:nth-child(18),
+.stagger > *:nth-child(19),
+.stagger > *:nth-child(20) {
+  animation-delay: 600ms;
+}

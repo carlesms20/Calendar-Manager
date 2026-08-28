@@ -99,17 +99,62 @@ export default function VoiceButton({ onGrabacionCompleta, disabled }: Props) {
 
   return (
     <div className="relative">
-      {/* Contador flotante encima del boton mientras graba */}
+      {/* Contador flotante encima del boton mientras graba, con waveform bars */}
       {grabando && (
         <div
-          className="animate-fade-in-up pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 rounded-full px-2.5 py-1 text-xs font-mono tabular-nums shadow-lg"
+          className="animate-fade-in-up pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-mono tabular-nums shadow-lg"
           style={{
             background: "#ef4444",
             color: "white",
             whiteSpace: "nowrap",
           }}
         >
-          ● {mm}:{ss}
+          {/* Waveform: 4 barras verticales con delays distintos */}
+          <div className="flex items-end gap-0.5" style={{ height: 10 }}>
+            <span
+              className="waveform-bar-1 inline-block"
+              style={{
+                width: 2,
+                height: 10,
+                background: "white",
+                borderRadius: 1,
+                transformOrigin: "bottom",
+              }}
+            />
+            <span
+              className="waveform-bar-2 inline-block"
+              style={{
+                width: 2,
+                height: 10,
+                background: "white",
+                borderRadius: 1,
+                transformOrigin: "bottom",
+              }}
+            />
+            <span
+              className="waveform-bar-3 inline-block"
+              style={{
+                width: 2,
+                height: 10,
+                background: "white",
+                borderRadius: 1,
+                transformOrigin: "bottom",
+              }}
+            />
+            <span
+              className="waveform-bar-4 inline-block"
+              style={{
+                width: 2,
+                height: 10,
+                background: "white",
+                borderRadius: 1,
+                transformOrigin: "bottom",
+              }}
+            />
+          </div>
+          <span>
+            {mm}:{ss}
+          </span>
         </div>
       )}
 

@@ -49,7 +49,7 @@ export default function Calendario({ onInvalidarSemanaActual }: Props) {
   }, [eventos]);
 
   return (
-    <div className="h-full overflow-hidden">
+    <div className="animate-fade-in-up h-full overflow-hidden">
       <Calendar
         eventos={eventos}
         cargando={cargando}

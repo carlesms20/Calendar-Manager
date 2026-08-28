@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 import Chat from "../components/Chat";
 import Composer from "../components/Composer";
 import FocusDelDia from "../components/FocusDelDia";
 import Brief from "../components/Brief";
 import PanelLateralDia from "../components/PanelLateralDia";
+import Toast from "../components/Toast";
 import { enviarTexto, enviarAudio } from "../lib/api";
 import { useBrief } from "../lib/useBrief";
+import { useToasts } from "../lib/useToasts";
 import type { Message, Tarea, Evento } from "../lib/types";
 
 interface Props {
@@ -51,6 +53,43 @@ export default function MiDia({
 }: Props) {
   const [briefAbierto, setBriefAbierto] = useState(false);
   const briefState = useBrief();
+  const { toasts, show, dismiss } = useToasts();
+
+  // Focus mode: doble-tap en el chat atenúa todo lo demás durante 3s.
+  // Toggle. Se sale con tap simple, tap fuera o auto en 3s.
+  const [focusMode, setFocusMode] = useState(false);
+  const focusModeTimer = useRef<number | null>(null);
+  const chatWrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (focusMode) {
+      focusModeTimer.current = window.setTimeout(() => {
+        setFocusMode(false);
+      }, 3500);
+    }
+    return () => {
+      if (focusModeTimer.current) window.clearTimeout(focusModeTimer.current);
+    };
+  }, [focusMode]);
+
+  function handleDoubleClickChat() {
+    setFocusMode((prev) => !prev);
+  }
+
+  // Header con blur al scrollear (Tanda C.9). Detectamos scroll del
+  // container principal y aplicamos clase header-scrolled.
+  const [headerScrolled, setHeaderScrolled] = useState(false);
+  const mainRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    function onScroll() {
+      setHeaderScrolled((el?.scrollTop ?? 0) > 24);
+    }
+    el.addEventListener("scroll", onScroll);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
 
   function handleAbrirBrief() {
     setBriefAbierto(true);
@@ -66,10 +105,14 @@ export default function MiDia({
     try {
       const respuesta = await enviarTexto(texto);
       onAnadirMensaje("assistant", respuesta.reply);
-      if (respuesta.agenda_modificada) onInvalidarDatos();
+      if (respuesta.agenda_modificada) {
+        onInvalidarDatos();
+        show("success", "Agenda actualizada");
+      }
     } catch (err) {
       const mensaje = err instanceof Error ? err.message : "Error desconocido";
       onAnadirMensaje("assistant", `Ha habido un problema: ${mensaje}`);
+      show("error", "No se pudo procesar tu mensaje");
     } finally {
       onSetProcesando(false);
     }
@@ -82,10 +125,14 @@ export default function MiDia({
     try {
       const respuesta = await enviarAudio(blob);
       onAnadirMensaje("assistant", respuesta.reply);
-      if (respuesta.agenda_modificada) onInvalidarDatos();
+      if (respuesta.agenda_modificada) {
+        onInvalidarDatos();
+        show("success", "Agenda actualizada");
+      }
     } catch (err) {
       const mensaje = err instanceof Error ? err.message : "Error desconocido";
       onAnadirMensaje("assistant", `Ha habido un problema: ${mensaje}`);
+      show("error", "No se pudo procesar el audio");
     } finally {
       onSetProcesando(false);
     }
@@ -96,10 +143,17 @@ export default function MiDia({
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {/* Cabecera con CTA prominente al Brief */}
+      {/* Cabecera con CTA prominente al Brief. Blur al scrollear (Sprint 5.3) */}
       <div
-        className="flex items-center justify-between border-b px-6 py-4"
-        style={{ borderColor: "var(--color-border)" }}
+        className={`sticky top-0 z-20 flex items-center justify-between border-b px-6 py-4 ${
+          headerScrolled ? "header-scrolled" : ""
+        } ${focusMode ? "focus-mode-dimmed" : ""}`}
+        style={{
+          borderColor: "var(--color-border)",
+          background: headerScrolled ? undefined : "var(--color-bg)",
+          transition:
+            "background 240ms var(--ease-standard), backdrop-filter 240ms var(--ease-standard)",
+        }}
       >
         <div className="flex items-baseline gap-3">
           <h2
@@ -149,18 +203,26 @@ export default function MiDia({
 
       {/* Layout 2 columnas: chat centrado + panel lateral derecho en desktop */}
       <div
+        ref={mainRef}
         className="mx-auto flex w-full flex-1 gap-4 overflow-hidden pt-4"
         style={{ maxWidth: "1300px" }}
       >
         {/* Columna principal (chat + focus) */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-6">
-          <FocusDelDia
-            tareas={tareas}
-            cargando={tareasCargando}
-            onIrATareas={onIrATareas}
-          />
+          <div className={focusMode ? "focus-mode-dimmed" : ""}>
+            <FocusDelDia
+              tareas={tareas}
+              cargando={tareasCargando}
+              onIrATareas={onIrATareas}
+            />
+          </div>
 
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {/* Chat wrapper con doble-click para toggle focus mode */}
+          <div
+            ref={chatWrapperRef}
+            onDoubleClick={handleDoubleClickChat}
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          >
             <Chat mensajes={mensajes} procesando={procesando} />
             <Composer
               onEnviarTexto={handleEnviarTexto}
@@ -170,12 +232,11 @@ export default function MiDia({
           </div>
         </div>
 
-        {/* Panel lateral derecho — solo en desktop grande (>=1100px) */}
+        {/* Panel lateral derecho — solo en desktop grande (>=1100px).
+            Se dimea también con focus mode. */}
         <div
-          className="hidden overflow-y-auto"
+          className={`hidden overflow-y-auto ${focusMode ? "focus-mode-dimmed" : ""}`}
           style={{ width: "280px", flexShrink: 0 }}
-          // Tailwind lg = 1024, pero queremos umbral algo mas alto para no
-          // ahogar el chat en portátiles pequeños.
           data-lateral-panel
         >
           <PanelLateralDia
@@ -195,6 +256,29 @@ export default function MiDia({
           }
         }
       `}</style>
+
+      {/* Toast container esquina inferior derecha (Sprint 5.3) */}
+      <div className="pointer-events-none fixed bottom-6 right-6 z-40 flex flex-col-reverse gap-2">
+        {toasts.map((t) => (
+          <div key={t.id} className="pointer-events-auto">
+            <Toast toast={t} onClose={dismiss} />
+          </div>
+        ))}
+      </div>
+
+      {/* Hint focus mode (aparece brevemente cuando se activa) */}
+      {focusMode && (
+        <div
+          className="pointer-events-none fixed left-1/2 top-8 z-50 -translate-x-1/2 rounded-full px-4 py-2 text-xs shadow-lg animate-fade-in-up"
+          style={{
+            background: "rgba(0,0,0,0.75)",
+            color: "white",
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          Focus mode · doble-tap para salir
+        </div>
+      )}
 
       <Brief
         abierto={briefAbierto}

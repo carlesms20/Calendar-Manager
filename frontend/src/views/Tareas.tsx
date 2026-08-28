@@ -184,16 +184,17 @@ export default function Tareas({
           </div>
         )}
 
-        <div className="flex flex-col gap-2">
+        <div className="stagger flex flex-col gap-2">
           {tareasFiltradas.map((t) => (
-            <TareaFila
-              key={t.id}
-              tarea={t}
-              expandida={expandidas.has(t.id)}
-              onToggle={() => toggleExpandir(t.id)}
-              onCompletar={() => accion(t.id, "Completed")}
-              onCancelar={() => accion(t.id, "Cancelled")}
-            />
+            <div key={t.id} className="card-hover-lift">
+              <TareaFila
+                tarea={t}
+                expandida={expandidas.has(t.id)}
+                onToggle={() => toggleExpandir(t.id)}
+                onCompletar={() => accion(t.id, "Completed")}
+                onCancelar={() => accion(t.id, "Cancelled")}
+              />
+            </div>
           ))}
         </div>
       </div>

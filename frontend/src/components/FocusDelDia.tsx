@@ -132,7 +132,7 @@ export default function FocusDelDia({ tareas, cargando, onIrATareas }: Props) {
         )}
       </div>
 
-      <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+      <div className="stagger grid grid-cols-1 gap-2 md:grid-cols-3">
         <BucketCard
           titulo="Bloqueadas"
           icono={<AlertOctagon size={14} />}
@@ -194,7 +194,9 @@ function BucketCard({
     <button
       onClick={vacio ? undefined : onClick}
       disabled={vacio}
-      className="rounded-xl border p-3 text-left transition-colors disabled:cursor-default"
+      className={`rounded-xl border p-3 text-left disabled:cursor-default ${
+        vacio ? "transition-colors" : "card-hover-lift"
+      }`}
       style={{
         background: "var(--color-surface)",
         borderColor: vacio ? "var(--color-border)" : color,

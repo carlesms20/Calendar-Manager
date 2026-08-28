@@ -34,9 +34,19 @@ export default function Topbar({
   atencionRequerida = 0,
 }: Props) {
   const [ahora, setAhora] = useState(new Date());
+  const [tickKey, setTickKey] = useState(0);
 
   useEffect(() => {
-    const interval = setInterval(() => setAhora(new Date()), 1000);
+    const interval = setInterval(() => {
+      setAhora((prev) => {
+        const nueva = new Date();
+        // Si cambio el minuto, aumentamos tickKey para triggerar animation
+        if (nueva.getMinutes() !== prev.getMinutes()) {
+          setTickKey((k) => k + 1);
+        }
+        return nueva;
+      });
+    }, 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -139,7 +149,8 @@ export default function Topbar({
             {fechaLabel}
           </span>
           <span
-            className="tabular-nums"
+            key={tickKey}
+            className="tabular-nums animate-clock-tick inline-block"
             style={{
               fontFamily: "var(--font-display)",
               fontSize: 24,
@@ -195,7 +206,9 @@ function ChipContexto({
 
   return (
     <div
-      className="flex items-center gap-3 rounded-full border px-4 py-1.5"
+      className={`flex items-center gap-3 rounded-full border px-4 py-1.5 ${
+        hayAtencion ? "animate-ambient-orange" : ""
+      }`}
       style={{
         background: bg,
         borderColor: color,
